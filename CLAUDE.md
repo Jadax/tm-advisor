@@ -15,3 +15,4 @@ Single-file Tampermonkey userscript (`TM_Advisor.js`) for TrophyManager. All log
 - Keep responses terse: state the change and where it lives, skip preamble and trailing summaries beyond 1-2 lines.
 - After any edit, run `node --check TM_Advisor.js` — that's the whole verification loop for this project, no build step, no tests.
 - Bump `@version` in the userscript header on every functional change.
+- Public repo: https://github.com/Jadax/tm-advisor (main branch). After every change that bumps @version, commit and push automatically — no need to ask each time. Commit message format: `vX.Y.Z: <one-line summary>`. Never commit `TM Guide/` or `.claude/` (gitignored — third-party reference material and local session config).
