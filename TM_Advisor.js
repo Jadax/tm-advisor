@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.2.0
-// @description  A single visual advisor for TrophyManager. A single collapsible dock (bottom-right, no separate button) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard (data freshness + next/last match) on the homepage, Tactics on the tactics/players pages, Scouting on the transfer/scouts pages, Stadium on stadium/finances. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Surfaces Rou / SI / R5 columns (with development trend arrows) on the game's own player and transfer tables, and on any individual player's profile page a Physique/Tactical/Technical star breakdown, exact sale-price figures and a training-growth projector. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
+// @version      3.3.0
+// @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
 // @match        https://trophymanager.com/*
@@ -37,16 +37,15 @@
  *   SECTION 1B DEVELOPMENT HISTORY   (dated squad snapshots + trends)
  *   SECTION 2  PARSERS               (turn raw HTML -> clean data)
  *   SECTION 2B RATING ENGINE         (R5/R6 formula)
- *   SECTION 2C VALUATION & GROWTH    (star-category breakdown, exact
- *                                       Sell-to-Agent/Max Sell Price,
- *                                       training-growth SI projector)
+ *   SECTION 2C VALUATION             (numeric category breakdown, exact
+ *                                       Sell-to-Agent/Max Sell Price)
  *   SECTION 3  NETWORK REFRESH       (fetch other pages, no nav)
  *   SECTION 4  LIVE-PAGE AUTO CAPTURE (+ Rou/SI/R5 columns on players
  *                                       & transfer tables; player-profile
- *                                       card with breakdown/valuation/
- *                                       growth projector; match-page R5
- *                                       overlay + full match stats &
- *                                       goal/card/injury timeline)
+ *                                       card with breakdown/valuation;
+ *                                       match-page R5 overlay + full
+ *                                       match stats & goal/card/injury
+ *                                       timeline)
  *   SECTION 5  TACTICS ENGINE        (formation + settings picker;
  *                                       position-aware substitution orders)
  *   SECTION 5B YOUTH FINDER          (transfer-list-only talent shortlist)
@@ -697,7 +696,7 @@
   }
 
   /* ------------------------------------------------------------
-   *  SECTION 2C — CATEGORY BREAKDOWN, VALUATION & GROWTH PROJECTION
+   *  SECTION 2C — CATEGORY BREAKDOWN & VALUATION
    *  ------------------------------------------------------------
    *  Everything here is cross-confirmed against TWO independent community
    *  scripts ("RatingR6 ReWrite" and "Trophymanager Squad R5 Value by
@@ -770,19 +769,6 @@
     if (p.ageMonths != null) return p.ageMonths;
     if (p.age == null) return null;
     return Math.max(1, Math.round(Number(p.age) * 12));
-  }
-
-  // Training-growth projection ("Trader's Calculator" in the community's "RX6 Full" script):
-  // given a player's current SI and a training plan (N weeks at a weekly Training Intensity),
-  // project their SI after that training. Self-consistent with our own R5 remainder formula —
-  // it's the same weight*SI <-> total-skill-points relationship inverted and re-applied, not a
-  // separate guess. Positive TI grows SI; the game applies this every week regardless of age.
-  function projectFutureASI(asi, weeks, weeklyTI, isGK) {
-    if (!asi || !weeks) return asi;
-    const weight = isGK ? 48717927500 : 263533760000;
-    const totalSkillPoints = Math.pow(weight * asi, 1 / 7);
-    const projected = totalSkillPoints + (weeks * weeklyTI / 10);
-    return Math.max(0, Math.pow(projected, 7) / weight);
   }
 
   /* ============================================================
@@ -1148,7 +1134,7 @@
     const trendChip = (delta) => {
       if (delta == null || delta === 0) return '';
       const up = delta > 0;
-      const col = up ? '#5fc98a' : '#e2726b';
+      const col = up ? '#5b8fc9' : '#e2726b';
       const arrow = up ? '▲' : '▼';
       return ` <span style="color:${col};font-size:9px;font-weight:600;">${arrow}${Math.abs(delta)}</span>`;
     };
@@ -1339,8 +1325,8 @@
 
       const box = document.createElement('div');
       box.id = 'tma-player-card';
-      box.style.cssText = 'margin:8px 0;padding:12px 14px;background:#20242988;border:1px solid #2c313780;border-radius:10px;color:#e4e7ea;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:12.5px;';
-      const stat = (label, val) => `<div><div style="font-size:10px;color:#8a939c;text-transform:uppercase;letter-spacing:.04em;">${label}</div><div style="font-size:15px;font-weight:700;color:#7fb2e0;">${val}</div></div>`;
+      box.style.cssText = 'margin:8px 0;padding:10px 12px;background:#1c212788;border:1px solid #2b323b80;border-radius:9px;color:#dfe3e7;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:12px;';
+      const stat = (label, val) => `<div><div style="font-size:9.5px;color:#8a94a0;text-transform:uppercase;letter-spacing:.04em;">${label}</div><div style="font-size:14px;font-weight:700;color:#6fa3d8;">${val}</div></div>`;
       const r5Stat = r5ByPosition.length > 1
         ? stat('R5', r5ByPosition.map(x => `${x.label} ${x.r5 != null ? x.r5.toFixed(1) : '-'}`).join(' / '))
         : stat('R5', r5ByPosition[0] && r5ByPosition[0].r5 != null ? r5ByPosition[0].r5.toFixed(1) : '-');
@@ -1348,45 +1334,22 @@
         + stat('SI', p.asi != null ? Number(p.asi).toLocaleString() : '-')
         + r5Stat
         + (staPrice ? stat('Sell-to-Agent', Number(staPrice).toLocaleString()) : '')
-        + (maxPrice ? stat('Max Sell Price', Number(maxPrice).toLocaleString()) : '')
-        + '<div style="margin-left:auto;font-size:10px;color:#8a939c;align-self:center;">TM Advisor</div>';
+        + (maxPrice ? stat('Max Sell Price', Number(maxPrice).toLocaleString()) : '');
 
-      // Category breakdown — same 5-6 star categories the game's own player page shows
-      // (Physique/Tactical/Technical + role-specific extras), see Section 2C. Shows the
-      // numeric rating alongside the stars, not stars alone.
+      // Category breakdown — same categories the game's own player page shows
+      // (Physique/Tactical/Technical + role-specific extras), see Section 2C. Numeric only.
       const catChip = (label, val) => {
         const v = Math.max(0, Math.min(5, val || 0));
-        const full = Math.floor(v), half = v - full >= 0.5;
-        const stars = '★'.repeat(full) + (half ? '½' : '') + '☆'.repeat(Math.max(0, 5 - full - (half ? 1 : 0)));
-        return `<div style="min-width:100px;"><div style="font-size:10px;color:#8a939c;">${label}</div><div style="font-size:12px;color:#e0be6b;"><span style="letter-spacing:1px;">${stars}</span> <span style="color:#e4e7ea;">${v.toFixed(2)}</span></div></div>`;
+        return `<div style="min-width:78px;"><div style="font-size:9.5px;color:#8a94a0;">${label}</div><div style="font-size:12px;color:#e4e7ea;font-weight:600;">${v.toFixed(2)}</div></div>`;
       };
       const catRow = Object.entries(cats).map(([k, v]) => catChip(k, v)).join('');
 
       box.innerHTML = `
-        <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;">${statRow}</div>
-        <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;padding-top:10px;border-top:1px solid #2c313780;">${catRow}</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;padding-top:10px;border-top:1px solid #2c313780;">
-          <div style="font-size:10px;color:#8a939c;text-transform:uppercase;letter-spacing:.04em;margin-right:4px;">Growth projection</div>
-          <label style="font-size:10px;color:#8a939c;">Weeks<br><input id="tma-proj-weeks" type="number" min="1" value="12" style="width:52px;background:#181b1f;border:1px solid #2c313780;color:#e4e7ea;border-radius:5px;padding:3px 5px;"></label>
-          <label style="font-size:10px;color:#8a939c;">Weekly TI<br><input id="tma-proj-ti" type="number" value="0" style="width:64px;background:#181b1f;border:1px solid #2c313780;color:#e4e7ea;border-radius:5px;padding:3px 5px;"></label>
-          <button id="tma-proj-go" style="background:#2c7a30;color:#fff4d6;border:1px solid #7fb2e040;border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer;font-weight:700;">Project</button>
-          <span id="tma-proj-result" style="font-size:11.5px;color:#7fb2e0;"></span>
-        </div>
-        <div style="font-size:10px;color:#8a939c;margin-top:6px;">Training Intensity (TI) is read off this player's own weekly training report — enter what your training ground/coaches currently produce for them. Projection uses the same weight*SI ↔ skill-points relationship as the R5 engine, inverted (Section 2C) — not a separate guess.</div>
+        <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;">${statRow}</div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px solid #2b323b80;">${catRow}</div>
       `;
       const anchor = document.querySelector('.column1_a .std') || document.querySelector('.box_body') || document.querySelector('.main_center');
       if (anchor) anchor.insertBefore(box, anchor.firstChild);
-
-      const goBtn = box.querySelector('#tma-proj-go');
-      if (goBtn) goBtn.addEventListener('click', () => {
-        const weeks = Number(box.querySelector('#tma-proj-weeks').value) || 0;
-        const ti = Number(box.querySelector('#tma-proj-ti').value) || 0;
-        const result = box.querySelector('#tma-proj-result');
-        if (!weeks || p.asi == null) { result.textContent = 'Need weeks and a known SI.'; return; }
-        const newAsi = projectFutureASI(Number(p.asi), weeks, ti, isGK);
-        const projSt = calcSellToAgentPrice(newAsi, (ageMonths || 0) + weeks, isGK);
-        result.innerHTML = `SI → <b>${Math.round(newAsi).toLocaleString()}</b>${projSt ? ' · Sell-to-Agent → <b>' + Number(projSt).toLocaleString() + '</b>' : ''}`;
-      });
     } catch (e) {
       console.warn('TM Advisor: player detail overlay failed', e);
       _playerPageDone = false;
@@ -1562,7 +1525,7 @@
         const tag = document.createElement('span');
         tag.className = 'tma-match-r5';
         tag.textContent = 'R5 ' + Number(p._r5).toFixed(1);
-        tag.style.cssText = 'display:inline-block;margin-left:4px;padding:0 4px;border-radius:3px;background:#1b4d1e;color:#7fb2e0;font-weight:700;font-size:10px;';
+        tag.style.cssText = 'display:inline-block;margin-left:4px;padding:0 4px;border-radius:3px;background:#1c2c3d;color:#7fb2e0;font-weight:700;font-size:10px;';
         el.appendChild(tag);
       });
 
@@ -1570,7 +1533,7 @@
       if ((homeSum || awaySum) && !document.getElementById('tma-match-summary')) {
         const box = document.createElement('div');
         box.id = 'tma-match-summary';
-        box.style.cssText = 'margin:8px auto;max-width:640px;background:#0f1f11;border:1px solid #2f7d3266;border-radius:10px;padding:10px 14px;color:#e4e7ea;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;';
+        box.style.cssText = 'margin:8px auto;max-width:640px;background:#161c22;border:1px solid #2f7d3266;border-radius:10px;padding:10px 14px;color:#e4e7ea;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;';
         const col = (s) => s ? `avg R5 <b style="color:#7fb2e0">${s.r5.toFixed(1)}</b> · SI ${Math.round(s.asi).toLocaleString()} · Rou ${s.routine.toFixed(1)}` : 'n/a';
         box.innerHTML = `<div style="display:flex;justify-content:space-between;font-size:12px;">
           <div><b>${match.club.home.club_name || 'Home'}</b><br>${col(homeSum)}</div>
@@ -1918,7 +1881,7 @@
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     }).join(' ');
     const trendUp = recent[recent.length - 1] >= recent[0];
-    const color = trendUp ? '#5fc98a' : '#e2726b';
+    const color = trendUp ? '#5b8fc9' : '#e2726b';
     return `<svg width="${w}" height="${h}" style="vertical-align:middle;margin-left:4px;"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6"/></svg>`;
   }
 
@@ -2033,24 +1996,16 @@
     return Object.values(seen);
   }
 
-  // Ranking and filtering both shortlists needs full skills (for R5) and wage (for the cost
-  // side of scoutScore) — but browsing the transfer list only ever gives you SI (Breakdown) OR
-  // skills (Skills view) per visit, never both, and never wage at all. Rather than requiring
-  // you to manually flip through both views and open every player's profile for wage, this
-  // fetches everything at once via /ajax/tooltip.ajax.php (Section 4) — the same endpoint the
-  // player-profile card uses — for whichever pool players are still missing data, and merges
-  // the result straight into the transferSeen store so it's available for THIS build and every
-  // one after. Capped per run so a large pool doesn't fire off hundreds of requests at once.
+  // Full R5 needs skills, but browsing the transfer list only ever gives you SI (Breakdown)
+  // OR skills (Skills view) per visit, never both. Rather than blasting /ajax/tooltip.ajax.php
+  // (Section 4) for the entire seen-pool speculatively, this only fetches R5/Routine/SI for
+  // players already on a built shortlist (ids passed in) — keeping request volume tied to
+  // what you're actually deciding on, not everyone you've ever glanced at.
   const FULL_STATS_FETCH_CAP = 60;
-  async function fetchFullStatsForPool(onProgress) {
+  async function fetchFullStatsForPool(ids, onProgress) {
     const c = loadCache();
     const store = (c.transferSeen && c.transferSeen.data) || {};
-    const ids = Object.keys(store);
-    const incomplete = ids.filter(id => {
-      const p = store[id];
-      const r5 = transferR5(p);
-      return isNaN(r5) || p.wage == null;
-    }).slice(0, FULL_STATS_FETCH_CAP);
+    const incomplete = ids.filter(id => store[id] && isNaN(transferR5(store[id]))).slice(0, FULL_STATS_FETCH_CAP);
     let done = 0;
     for (const id of incomplete) {
       done++;
@@ -2067,7 +2022,6 @@
             age: norm.age != null ? norm.age : prev.age,
             asi: norm.asi != null ? norm.asi : prev.asi,
             routine: norm.routine != null ? norm.routine : prev.routine,
-            wage: norm.wage != null ? norm.wage : prev.wage,
             skills: { ...(prev.skills || {}), ...norm.skills },
           };
         }
@@ -2076,7 +2030,7 @@
     const cc = loadCache();
     cc.transferSeen = { t: now(), data: store };
     saveCache(cc);
-    const stillIncomplete = ids.filter(id => { const p = store[id]; return isNaN(transferR5(p)) || p.wage == null; }).length;
+    const stillIncomplete = ids.filter(id => store[id] && isNaN(transferR5(store[id]))).length;
     return { fetched: incomplete.length, remaining: stillIncomplete, totalPool: ids.length };
   }
 
@@ -2458,9 +2412,9 @@
   const STYLE = `
   /* ---- Design tokens (change the theme in ONE place) ---- */
   #tma-panel {
-    --tma-bg:#181b1f; --tma-bg-2:#1e2227; --tma-card:#20242980; --tma-line:#2c313780;
-    --tma-gold:#7fb2e0; --tma-lime:#5fc98a; --tma-text:#e4e7ea; --tma-mute:#8a939c;
-    --tma-red:#e2726b; --tma-amber:#d1a355;
+    --tma-bg:#161a1f; --tma-bg-2:#1b2027; --tma-card:#1e242b80; --tma-line:#2b323b80;
+    --tma-gold:#79a8d6; --tma-lime:#5b8fc9; --tma-text:#e6e9ec; --tma-mute:#8a94a0;
+    --tma-red:#cf7a72; --tma-amber:#b79a68;
   }
   /* ---- Panel shell: the ONLY floating element — always present, docked bottom-right.
      Collapsed by default down to just its header; expands in place, nothing else to summon. ---- */
@@ -2484,9 +2438,9 @@
   .tma-chevron { display:inline-block; transition:transform .2s ease; }
   #tma-panel.tma-collapsed .tma-chevron { transform:rotate(-90deg); }
   .tma-sub { font-size:11px; color:var(--tma-mute); margin-top:2px; padding-bottom:10px; display:flex; align-items:center; gap:6px; }
-  .tma-ctx-dot { width:6px; height:6px; border-radius:50%; background:var(--tma-lime); box-shadow:0 0 0 0 #5fc98a66;
+  .tma-ctx-dot { width:6px; height:6px; border-radius:50%; background:var(--tma-lime); box-shadow:0 0 0 0 #5b8fc966;
     animation:tma-pulse 2s infinite; display:inline-block; flex-shrink:0; }
-  @keyframes tma-pulse { 0%{box-shadow:0 0 0 0 #5fc98a66;} 70%{box-shadow:0 0 0 5px #5fc98a00;} 100%{box-shadow:0 0 0 0 #5fc98a00;} }
+  @keyframes tma-pulse { 0%{box-shadow:0 0 0 0 #5b8fc966;} 70%{box-shadow:0 0 0 5px #5b8fc900;} 100%{box-shadow:0 0 0 0 #5b8fc900;} }
   .tma-tabs { display:flex; gap:2px; padding:0 8px; overflow-x:auto; scrollbar-width:none; }
   .tma-tabs::-webkit-scrollbar { display:none; }
   .tma-tab { flex:1 0 auto; min-width:64px; text-align:center; padding:8px 6px; font-size:11.5px; border-radius:8px 8px 0 0; cursor:pointer;
@@ -2495,28 +2449,28 @@
   .tma-tab.active { background:var(--tma-bg); color:var(--tma-gold); font-weight:700; }
   .tma-tab.active:after { content:""; position:absolute; left:18%; right:18%; bottom:-1px; height:2px; border-radius:2px; background:var(--tma-gold); }
   /* ---- Scrollable body ---- */
-  .tma-body { padding:12px 14px 16px; overflow-y:auto; flex:1 1 auto; scrollbar-width:thin; scrollbar-color:#2f7d32 transparent; }
+  .tma-body { padding:12px 14px 16px; overflow-y:auto; flex:1 1 auto; scrollbar-width:thin; scrollbar-color:#3f6f9a transparent; }
   .tma-body::-webkit-scrollbar { width:7px; }
-  .tma-body::-webkit-scrollbar-thumb { background:#2f7d3266; border-radius:4px; }
-  .tma-body::-webkit-scrollbar-thumb:hover { background:#2f7d32aa; }
+  .tma-body::-webkit-scrollbar-thumb { background:#3f6f9a66; border-radius:4px; }
+  .tma-body::-webkit-scrollbar-thumb:hover { background:#3f6f9aaa; }
   /* ---- Cards ---- */
   .tma-card { background:var(--tma-card); border:1px solid var(--tma-line); border-radius:11px;
     padding:12px 13px; margin-bottom:9px; transition:border-color .15s; }
-  .tma-card:hover { border-color:#2f7d3255; }
+  .tma-card:hover { border-color:#3f6f9a55; }
   .tma-card h4 { margin:0 0 8px; font-size:12.5px; color:var(--tma-text); display:flex; justify-content:space-between; align-items:center; gap:8px; font-weight:700; letter-spacing:.1px; }
   .tma-row { display:flex; justify-content:space-between; align-items:center; font-size:12.5px; padding:5px 0; border-bottom:1px solid #ffffff08; gap:8px; }
   .tma-row:last-child { border-bottom:none; }
   .tma-dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:6px; flex-shrink:0; }
   .dot-green{ background:var(--tma-lime); } .dot-amber{ background:var(--tma-amber); } .dot-red{ background:var(--tma-red); } .dot-grey{ background:#4a5a4c; }
   /* ---- Buttons ---- */
-  .tma-btn { background:#2c7a30; color:#fff4d6; border:1px solid #7fb2e040; border-radius:8px;
+  .tma-btn { background:#2c4f76; color:#eef3f8; border:1px solid #7fb2e040; border-radius:8px;
     padding:9px 12px; font-size:12.5px; cursor:pointer; font-weight:700; width:100%; margin-top:8px; letter-spacing:.1px;
     transition:filter .15s, transform .1s; }
   .tma-btn:hover { filter:brightness(1.12); }
   .tma-btn:active { transform:translateY(1px); }
   .tma-btn:disabled { opacity:.5; cursor:not-allowed; filter:none; }
-  .tma-btn.secondary { background:#16281a; color:var(--tma-mute); font-weight:600; }
-  .tma-btn.secondary:hover { color:var(--tma-text); background:#1c3320; }
+  .tma-btn.secondary { background:#1c232b; color:var(--tma-mute); font-weight:600; }
+  .tma-btn.secondary:hover { color:var(--tma-text); background:#232c36; }
   /* ---- Pitch ---- */
   .tma-pitch { display:flex; flex-direction:column; gap:7px; border-radius:11px; padding:13px 8px; position:relative;
     background:linear-gradient(180deg,#0d260f,#102a13);
@@ -2531,9 +2485,9 @@
   .tma-role-tag { font-size:9.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--tma-mute); width:42px; flex-shrink:0; }
   .tma-pos { font-size:9.5px; color:var(--tma-mute); text-transform:uppercase; letter-spacing:.03em; }
   .tma-empty { color:var(--tma-red); font-style:italic; }
-  .tma-reason { font-size:11.4px; color:#c3e0c3; margin:5px 0; padding-left:14px; position:relative; line-height:1.45; }
+  .tma-reason { font-size:11.4px; color:#b7c4d6; margin:5px 0; padding-left:14px; position:relative; line-height:1.45; }
   .tma-reason:before { content:"–"; position:absolute; left:0; color:var(--tma-mute); }
-  .tma-badge { font-size:9.5px; padding:2px 7px; border-radius:20px; background:#1c3a20; color:#a9d6a9; white-space:nowrap; font-weight:600; }
+  .tma-badge { font-size:9.5px; padding:2px 7px; border-radius:20px; background:#1c2c3d; color:#9fc3e0; white-space:nowrap; font-weight:600; }
   .tma-progress { font-size:11px; color:var(--tma-mute); margin-top:6px; }
   .tma-mini { font-size:10.6px; color:var(--tma-mute); line-height:1.45; }
   .tma-goodval { color:var(--tma-lime); font-weight:700; }
@@ -2726,7 +2680,7 @@
       }).join('');
 
     const nm = c.home && c.home.data && c.home.data.nextMatch;
-    const nmHtml = nm ? `<div class="tma-mini">${nm.home.name} vs ${nm.away.name}<br>${nm.when || ''}</div>` : `<div class="tma-mini">Visit the home page once, then hit "Update All".</div>`;
+    const nmHtml = nm ? `<div class="tma-mini">${nm.home.name} vs ${nm.away.name}<br>${nm.when || ''}</div>` : `<div class="tma-mini">No data yet.</div>`;
 
     const lastResult = c.lastMatchResult;
     const lastResultHtml = lastResult ? (() => {
@@ -2781,7 +2735,7 @@
     const scoutSlice = getSlice('opponentScouting');
     const expectedSlice = getSlice('opponentExpected');
     if (!playersSlice) {
-      body.innerHTML = `<div class="tma-card"><h4>No squad data yet</h4><div class="tma-reason">Visit your Players page once (or hit Update All on the Dashboard tab).</div></div>`;
+      body.innerHTML = `<div class="tma-card"><h4>No squad data yet</h4></div>`;
       return;
     }
     const players = playersSlice.data.filter(p => !p.ban || p.ban === '0').filter(p => !p.inj);
@@ -2956,17 +2910,17 @@
     const maintenanceSlice = getSlice('maintenance');
     const clubSlice = getSlice('club');
     if (!stadiumSlice) {
-      body.innerHTML = `<div class="tma-card"><h4>No stadium data yet</h4><div class="tma-reason">Visit the Stadium page once (or hit Update All on Dashboard).</div></div>`;
+      body.innerHTML = `<div class="tma-card"><h4>No stadium data yet</h4></div>`;
       return;
     }
     // Cash source priority: Finances balance (confirmed reliable — regex matches "Current
     // Balance:" text directly) > Home page inline var > Stadium page inline var. The inline
     // SESSION["cash"]/manager_cash regexes are best-effort since the exact JS var name can
     // change; Finances is the one place we're always sure of the number.
-    let cash = null, cashSource = null;
-    if (financesSlice && financesSlice.data.balance != null) { cash = financesSlice.data.balance; cashSource = 'Finances page'; }
-    else if (homeSlice && homeSlice.data.cash != null) { cash = homeSlice.data.cash; cashSource = 'Home page'; }
-    else if (stadiumSlice.data.cash != null) { cash = stadiumSlice.data.cash; cashSource = 'Stadium page'; }
+    let cash = null;
+    if (financesSlice && financesSlice.data.balance != null) cash = financesSlice.data.balance;
+    else if (homeSlice && homeSlice.data.cash != null) cash = homeSlice.data.cash;
+    else if (stadiumSlice.data.cash != null) cash = stadiumSlice.data.cash;
     const fd = stadiumSlice.data.facilityData;
     const stadiumSeats = fd && fd.stadium ? fd.stadium.level : null;
     const attendanceRef = stadiumSeats ? Math.round(stadiumSeats * 0.65) : 15000; // rough fill-rate assumption
@@ -2975,16 +2929,14 @@
     // dedicated Maintenance page's own "Total" row (exact, per-facility-summed figure) over
     // the Finances tab's weekly aggregate, falling back to the latter if that page hasn't
     // been visited/fetched yet.
-    let financials = null, maintenanceSource = null;
+    let financials = null;
     if (financesSlice && financesSlice.data.weekly) {
       const w = financesSlice.data.weekly;
       const get = (label, idx) => w[label] ? parseMoney(w[label][idx || 0]) : 0;
       const weeklyIncome = get('Attendance') + get('TV Money') + get('Sponsors') + get('Merchandise') + get('Food');
       let weeklyMaintenance = Math.abs(get('Maintenance'));
-      maintenanceSource = 'Finances tab (aggregate)';
       if (maintenanceSlice && maintenanceSlice.data.totals && maintenanceSlice.data.totals['Total']) {
         weeklyMaintenance = maintenanceSlice.data.totals['Total'].week;
-        maintenanceSource = 'Maintenance page (exact)';
       }
       financials = { weeklyIncome, weeklyMaintenance };
     }
@@ -3023,23 +2975,13 @@
     body.innerHTML = `
       <div class="tma-card">
         <h4>Cash on hand</h4>
-        <div class="tma-row"><span>Available</span><span class="tma-goodval">${cash != null ? cash.toLocaleString() : 'unknown — visit Finances page once'}</span></div>
-        ${cash != null ? `<div class="tma-mini">Source: ${cashSource}</div>` : ''}
+        <div class="tma-row"><span>Available</span><span class="tma-goodval">${cash != null ? cash.toLocaleString() : '—'}</span></div>
         ${financials ? `<div class="tma-row"><span>Weekly income (approx.)</span><span>${financials.weeklyIncome.toLocaleString()}</span></div>
           <div class="tma-row"><span>Weekly maintenance (current)</span><span>${financials.weeklyMaintenance.toLocaleString()}</span></div>
-          <div class="tma-mini">Maintenance source: ${maintenanceSource}${!maintenanceSlice ? ' — visit /finances/maintenance/ once for the exact figure' : ''}</div>
           <div class="tma-row"><span>Headroom</span><span class="${financials.weeklyIncome - financials.weeklyMaintenance > 0 ? 'tma-goodval' : ''}">${(financials.weeklyIncome - financials.weeklyMaintenance).toLocaleString()}/wk</span></div>` : ''}
-        <div class="tma-mini">Attendance assumption for ROI math: ~${attendanceRef.toLocaleString()} (65% of ${stadiumSeats ? stadiumSeats.toLocaleString() : '?'} seats). Refine by checking recent Attendance income on the Finances tab.</div>
         ${seatTargetHtml}
       </div>
-      <div class="tma-card">
-        <h4>Upgrade Priority Order</h4>
-        <div class="tma-reason"><b>1. Youth Academy / Training Ground</b> — per community advice: push these first since their benefit compounds every week going forward.</div>
-        <div class="tma-reason"><b>2. Income generators</b> (Fast Food, Merchandise, Restaurant, Sausage Stand) — ranked below by fastest payback.</div>
-        <div class="tma-reason"><b>3. Everything else</b> (attendance/quality-of-life facilities).</div>
-        <div class="tma-reason">This ordering is a stated community heuristic we haven't independently verified against TM's actual mechanics — apply your own judgement, especially if your Youth Academy is already high-level relative to your league.</div>
-      </div>
-      <h4 style="margin:4px 2px;color:#7fb2e0;">Ranked Upgrades (priority tier, then value)</h4>
+      <h4 style="margin:4px 2px;color:#7fb2e0;">Ranked Upgrades</h4>
       ${rowsHtml || '<div class="tma-mini">All facilities maxed, or no cost data found.</div>'}
     `;
   }
@@ -3066,20 +3008,15 @@
     // (home-nation only) and, when on, includes players whose nationality is unknown too.
     const prefsControlsHtml = (which, prefs) => {
       const auto = effectiveMaxCost({}); // what an empty field resolves to right now
-      const hint = prefs.maxCost != null
-        ? `fixed at your typed cap — clear the field to switch back to auto`
-        : (auto ? `blank = auto, currently ${money(auto)} (tracks your affordable budget live)` : 'blank = no cap yet — visit /home/ or /finances/ so a budget is known');
       // Senior-only: max age. 27 is straight from TM's own Player Development guide — skills
       // are confirmed to start deteriorating from 28 onward — not an invented cutoff, but
       // still a live input since a short-term "win now" signing might justify going older.
       const ageRow = which === 'senior'
-        ? `<div class="tma-row"><span>Max age</span><input type="number" id="tma-${which}-maxage" min="${SENIOR_CRITERIA.minAge}" max="45" value="${prefs.maxAge != null ? prefs.maxAge : SENIOR_CRITERIA.maxAgeDefault}" style="width:130px;background:#181b1f;border:1px solid #2c313780;color:#e4e7ea;border-radius:5px;padding:4px 7px;text-align:right;"></div>
-           <div class="tma-mini" style="margin:-2px 0 6px;">Default ${SENIOR_CRITERIA.maxAgeDefault} — TM's own guide confirms skills begin deteriorating from age 28.</div>`
+        ? `<div class="tma-row"><span>Max age</span><input type="number" id="tma-${which}-maxage" min="${SENIOR_CRITERIA.minAge}" max="45" value="${prefs.maxAge != null ? prefs.maxAge : SENIOR_CRITERIA.maxAgeDefault}" style="width:130px;background:#161a1f;border:1px solid #2b323b80;color:#e6e9ec;border-radius:5px;padding:4px 7px;text-align:right;"></div>`
         : '';
       return `
       ${ageRow}
-      <div class="tma-row"><span>Max cost</span><input type="number" id="tma-${which}-maxcost" placeholder="${auto ? money(auto) : 'no limit'}" min="0" step="100000" value="${prefs.maxCost != null ? prefs.maxCost : ''}" style="width:130px;background:#181b1f;border:1px solid #2c313780;color:#e4e7ea;border-radius:5px;padding:4px 7px;text-align:right;"></div>
-      <div class="tma-mini" style="margin:-2px 0 6px;">${hint}</div>
+      <div class="tma-row"><span>Max cost</span><input type="number" id="tma-${which}-maxcost" placeholder="${auto ? money(auto) : 'no limit'}" min="0" step="100000" value="${prefs.maxCost != null ? prefs.maxCost : ''}" style="width:130px;background:#161a1f;border:1px solid #2b323b80;color:#e6e9ec;border-radius:5px;padding:4px 7px;text-align:right;"></div>
       <label class="tma-row" style="cursor:pointer;"><span>Include foreign players</span><input type="checkbox" id="tma-${which}-foreign" ${prefs.includeForeign ? 'checked' : ''}></label>
     `;
     };
@@ -3110,7 +3047,7 @@
     const natBadge = (p) => {
       if (!p.nat) return '';
       const home = MY_COUNTRY && p.nat === MY_COUNTRY;
-      return ` <span class="tma-badge" style="background:${home ? '#1c3a20' : '#2c313780'};color:${home ? '#a9d6a9' : '#c7cdd3'};">${p.nat.toUpperCase()}${home ? ' · home' : ''}</span>`;
+      return ` <span class="tma-badge" style="background:${home ? '#1c2c3d' : '#2c313780'};color:${home ? '#9fc3e0' : '#c7cdd3'};">${p.nat.toUpperCase()}${home ? ' · home' : ''}</span>`;
     };
     const playerLink = (p) => `https://trophymanager.com/players/${p.id}/`;
     // Cost row shared by youth + senior cards: a live transfer-list bid when we've seen one
@@ -3126,7 +3063,7 @@
 
     const shortlistHtml = (shortlist && shortlist.length) ? shortlist.map(p => `
       <div class="tma-card">
-        <h4><a href="${playerLink(p)}" target="_blank" style="color:#7fb2e0;text-decoration:none;">${p.name} ↗</a>${badge(p)}${natBadge(p)}</h4>
+        <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${p.name} ↗</a>${badge(p)}${natBadge(p)}</h4>
         <div class="tma-row"><span>Age</span><span class="tma-goodval">${p.age != null ? p.age : '?'}</span></div>
         <div class="tma-row"><span>Position</span><span>${p.fp || '?'}</span></div>
         <div class="tma-row"><span>R5</span><span class="tma-goodval">${p.r5 != null ? p.r5.toFixed(1) : '—'}</span></div>
@@ -3134,9 +3071,8 @@
         <div class="tma-row"><span>Routine</span><span>${p.routine != null ? p.routine.toFixed(1) : '—'}</span></div>
         ${costRow(p)}
         ${p.potential != null ? `<div class="tma-row"><span>Scout potential</span><span class="tma-goodval">${(p.potential / 2).toFixed(1)} / 5${p.growth != null ? ' · ' + p.growth.toFixed(1) + '× rec' : ''}</span></div>` : ''}
-        <div class="tma-mini">Seen on the transfer list ${ago(shortlistSlice ? shortlistSlice.t : null)}</div>
       </div>`).join('')
-      : `<div class="tma-mini">No shortlist built yet. There ${poolNow.length === 1 ? 'is' : 'are'} <b>${poolNow.length}</b> player(s) seen on the transfer list so far. Hit “Fetch full stats” to pull R5/Routine/SI/Wage for them automatically, then “Build / Refresh Shortlist”.</div>`;
+      : `<div class="tma-mini">No shortlist built yet (${poolNow.length} seen).</div>`;
 
     // ---- Senior transfer targets (Section 5C) ----
     const seniorSlice = getSlice('seniorShortlist');
@@ -3145,18 +3081,16 @@
     const weakestRowsHtml = weakestMap ? Object.entries(weakestMap).map(([b, v]) => `<div class="tma-row"><span>${b}</span><span>${v.toFixed(1)}</span></div>`).join('') : '';
     const seniorHtml = (seniorList && seniorList.length) ? seniorList.map(p => `
       <div class="tma-card">
-        <h4><a href="${playerLink(p)}" target="_blank" style="color:#7fb2e0;text-decoration:none;">${p.name} ↗</a>${tierBadge(p)}${natBadge(p)}</h4>
+        <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${p.name} ↗</a>${tierBadge(p)}${natBadge(p)}</h4>
         <div class="tma-row"><span>Age</span><span>${p.age != null ? p.age : '?'}</span></div>
         <div class="tma-row"><span>Position</span><span>${p.fp || '?'}</span></div>
-        <div class="tma-row"><span>R5</span><span class="tma-goodval">${p.r5Known ? p.r5.toFixed(1) : '—'}${p.baseline != null ? ` <span class="tma-mini">(your weakest ${bucketFor(p.fp)}: ${p.baseline.toFixed(1)})</span>` : ''}</span></div>
-        ${!p.r5Known ? `<div class="tma-mini" style="margin:-2px 0 4px;">R5 pending — skills not seen yet on the transfer list (flip to Skills view); qualified here on SI alone.</div>` : ''}
+        <div class="tma-row"><span>R5</span><span class="tma-goodval">${p.r5Known ? p.r5.toFixed(1) : '—'}${p.baseline != null ? ` <span class="tma-mini">(weakest ${bucketFor(p.fp)}: ${p.baseline.toFixed(1)})</span>` : ''}</span></div>
         <div class="tma-row"><span>SI</span><span>${p.asi != null ? p.asi.toLocaleString() : '—'}</span></div>
         <div class="tma-row"><span>Routine</span><span>${p.routine != null ? p.routine.toFixed(1) : '—'}</span></div>
         ${p.wage ? `<div class="tma-row"><span>Wage</span><span>${money(p.wage)}/wk</span></div>` : ''}
         ${costRow(p)}
-        <div class="tma-mini">Source: ${p.src || 'transfer list'}${p.price ? ' · current bid, not a guaranteed sale price' : ''}</div>
       </div>`).join('')
-      : `<div class="tma-mini">No senior shortlist built yet. Hit “Fetch full stats” to pull R5/Routine/SI/Wage for the transfer-list pool automatically (SI alone from Breakdown still qualifies a candidate before that finishes), then “Build / Refresh Senior Targets”.</div>`;
+      : `<div class="tma-mini">No senior shortlist built yet.</div>`;
 
     // ---- Budget guidance (Section 5D) ----
     const budget = budgetGuidance();
@@ -3165,10 +3099,9 @@
         <h4>Spending Guidance</h4>
         <div class="tma-row"><span>Cash on hand</span><span>${money(budget.cash)}</span></div>
         ${budget.weeklyWage != null ? `<div class="tma-row"><span>Weekly wage bill</span><span>${money(budget.weeklyWage)}</span></div>
-        <div class="tma-row"><span>Reserve kept back (${BUDGET_WAGE_WEEKS_RESERVE}wk wages)</span><span>${money(budget.buffer)}</span></div>` : `<div class="tma-mini">Weekly wage bill not read yet — visit /finances/ once for a wage-aware reserve instead of the raw cash figure.</div>`}
+        <div class="tma-row"><span>Reserve kept back (${BUDGET_WAGE_WEEKS_RESERVE}wk wages)</span><span>${money(budget.buffer)}</span></div>` : ''}
         <div class="tma-row"><span>Recommended transfer budget</span><span class="tma-goodval">${money(budget.recommendedMax)}</span></div>
-        <div class="tma-reason">Heuristic, not a game rule: keeps ${BUDGET_WAGE_WEEKS_RESERVE} weeks of wages in reserve, then treats ${Math.round(BUDGET_SPEND_FRACTION * 100)}% of what's left as this window's budget (tune BUDGET_WAGE_WEEKS_RESERVE / BUDGET_SPEND_FRACTION in Section 5D). Split it across your highest-value senior targets below rather than one big bid.</div>
-      </div>` : `<div class="tma-mini">Cash not read yet — visit /home/ or /finances/ (or hit Update All on the Dashboard) for spending guidance.</div>`;
+      </div>` : `<div class="tma-mini">Cash not read yet.</div>`;
 
     // ---- 2. Scout-report potential view (secondary source; no age/skills from endpoint) ----
     const scoutListHtml = (scoutData && scoutData.length) ? (() => {
@@ -3176,21 +3109,19 @@
       return ranked.slice(0, 20).map(p => {
         const gem = p.growthMultiple != null && p.growthMultiple >= YOUTH_CRITERIA.highPotentialGrowth;
         return `<div class="tma-card">
-          <h4><a href="${playerLink(p)}" target="_blank" style="color:#7fb2e0;text-decoration:none;">${p.name} ↗</a> ${gem ? '<span class="tma-badge" style="background:#2a2f42;color:#b9c4ee;">high potential</span>' : ''}</h4>
+          <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${p.name} ↗</a> ${gem ? '<span class="tma-badge" style="background:#2a2f42;color:#b9c4ee;">high potential</span>' : ''}</h4>
           <div class="tma-row"><span>Current Rec</span><span>${(p.rec || 0).toFixed(1)}</span></div>
           <div class="tma-row"><span>Potential</span><span class="tma-goodval">${(p.potential / 2).toFixed(1)} / 5</span></div>
-          <div class="tma-mini">Scouted ${p.date || 'recently'}${p.growthMultiple != null ? ' · potential is ' + p.growthMultiple.toFixed(1) + '× current rec' : ''}. Age not returned by the scouts endpoint — open the profile to age-check.</div>
         </div>`;
       }).join('');
-    })() : '<div class="tma-mini">No scout reports cached yet — click "Refresh Scout Reports" below to pull them in for the high-potential view.</div>';
+    })() : '<div class="tma-mini">No scout reports cached yet.</div>';
 
     body.innerHTML = `
       <div class="tma-card">
         <h4>Senior Transfer Targets</h4>
-        <div class="tma-mini">From players seen on the <b>Transfer</b> list, players ${SENIOR_CRITERIA.minAge}-${seniorPrefs.maxAge != null ? seniorPrefs.maxAge : SENIOR_CRITERIA.maxAgeDefault} who beat the weakest starter in their own position bucket in <b>your current best XI</b> — by R5 when both SI and skills are known, or by SI alone (a bigger ${SENIOR_CRITERIA.minEdgePctSI}% edge required) when only Breakdown has been seen. Ranked Elite (top 20%) to Strong (next 30%); the rest are filtered out.</div>
-        ${weakestMap ? `<div class="tma-mini" style="margin-top:4px;">Your weakest starter per bucket right now:</div>${weakestRowsHtml}` : `<div class="tma-mini">Your squad isn't cached yet — visit /players/ once so we know what "better than my team" means per position.</div>`}
+        ${weakestMap ? weakestRowsHtml : `<div class="tma-mini">Squad not cached yet.</div>`}
         ${prefsControlsHtml('senior', seniorPrefs)}
-        <button class="tma-btn secondary" id="tma-senior-fetchstats">📡 Fetch full stats (R5 · Rou · SI · Wage)</button>
+        <button class="tma-btn secondary" id="tma-senior-fetchstats">📡 Fetch stats (R5 · Rou · SI)</button>
         <button class="tma-btn" id="tma-senior-build">🎯 Build / Refresh Senior Targets</button>
         ${seniorList && seniorList.length ? `<button class="tma-btn secondary" id="tma-senior-clear">🗑 Clear shortlist</button>` : ''}
         <div class="tma-mini" id="tma-senior-status">${seniorList ? seniorList.length + ' target(s) shortlisted (' + ago(seniorSlice.t) + ')' : 'Not built yet'}</div>
@@ -3198,30 +3129,21 @@
       ${seniorHtml}
       <div class="tma-card">
         <h4>Youth Talent Shortlist 🌱</h4>
-        <div class="tma-mini">Built ONLY from players you've seen on the <b>Transfer</b> list — never your own squad or a scanned/opponent club — scored by a composite of R5, SI, routine, age and cost (Section 5B). Only the <b>Elite</b> (top 20%) and <b>Strong</b> (next 30%) tiers are shown, the rest are filtered out.</div>
         <div class="tma-row"><span>Hard floors</span><span class="tma-mini">age ≤ ${YOUTH_CRITERIA.maxAge}, Rou ≥ ${YOUTH_CRITERIA.minRoutine}, SI ≥ ${YOUTH_CRITERIA.minASI}, R5 ≥ ${YOUTH_CRITERIA.minR5}</span></div>
-        <div class="tma-mini">Pool right now: ${poolNow.length} player(s) seen on the transfer list. Tune the floors in YOUTH_CRITERIA and the scoring in scoutScore (Section 5B).</div>
         ${prefsControlsHtml('youth', youthPrefs)}
-        <button class="tma-btn secondary" id="tma-youth-fetchstats">📡 Fetch full stats (R5 · Rou · SI · Wage)</button>
+        <button class="tma-btn secondary" id="tma-youth-fetchstats">📡 Fetch stats (R5 · Rou · SI)</button>
         <button class="tma-btn" id="tma-youth-build">🧮 Build / Refresh Shortlist</button>
-        ${shortlist && shortlist.length ? `<button class="tma-btn secondary" id="tma-youth-copy">📋 Copy shortlist (name · age · R5 · link)</button><button class="tma-btn secondary" id="tma-youth-clear">🗑 Clear shortlist</button>` : ''}
+        ${shortlist && shortlist.length ? `<button class="tma-btn secondary" id="tma-youth-copy">📋 Copy shortlist</button><button class="tma-btn secondary" id="tma-youth-clear">🗑 Clear shortlist</button>` : ''}
         <div class="tma-mini" id="tma-youth-status">${shortlist ? shortlist.length + ' player(s) shortlisted (' + ago(shortlistSlice.t) + ')' : 'Not built yet'}</div>
       </div>
       ${shortlistHtml}
       <div class="tma-card">
         <h4>Scouts' High-Potential Board <span class="tma-badge">by potential</span></h4>
-        <div class="tma-mini">From your own scouts' reports — current rec vs. flagged potential, to catch youngsters who look ordinary now but should develop well.</div>
         <button class="tma-btn secondary" id="tma-scout-refresh">🔍 Refresh Scout Reports</button>
         ${scoutData && scoutData.length ? `<button class="tma-btn secondary" id="tma-scout-clear">🗑 Clear scout reports</button>` : ''}
         <div class="tma-mini" id="tma-scout-status">${scoutData ? scoutData.length + ' reports cached (' + scoutAge + ')' : 'Not fetched yet'}</div>
       </div>
       ${scoutListHtml}
-      <div class="tma-card">
-        <h4>How to calibrate for “top talent”</h4>
-        <div class="tma-reason">The floors ship low so nothing is hidden. Open your Players page, read the <b>SI</b> and <b>R5</b> columns for a youngster you rate, then set <b>minASI</b>/<b>minR5</b> in Section 5B just below those numbers to filter the list to your level.</div>
-        <div class="tma-reason">On the <b>Transfer</b> page, SI + R5 columns are added to the results automatically. R5 needs both SI and skills, so flip once through <b>Breakdown</b> (shows SI) and <b>Skills</b> (shows skills) — R5 then fills in for every listed player, and browsing the page is also what fills the pool for both shortlists above. A player only ever seen in Breakdown still qualifies on SI alone, just with a bigger required edge.</div>
-        <div class="tma-reason">"Include foreign players" defaults OFF, matching TM's own transfer-list default (no /for/ in the URL) — home nation only, and a player whose flag we couldn't read does NOT pass through either. Flip it on to search everyone, matching TM's /for/ URL. If the youth/senior lists look emptier than expected with it off, that's usually a sign the flag-parsing pattern needs tuning for this page — try toggling it on temporarily as a sanity check. We could not find a hard "non-national squad limit" game rule anywhere in TM's own user guide or in any community script reviewed — this toggle is purely a search preference, not modelling a game rule.</div>
-      </div>
       ${budgetHtml}
     `;
 
@@ -3235,21 +3157,21 @@
       renderScouting();
     });
 
-    // Fetches R5/Routine/SI/Wage for the whole transfer-list pool via tooltip.ajax.php
-    // (Section 5B) then immediately rebuilds this shortlist with prefs read live from the
-    // inputs — one click takes you from "half-known SI-only rows" to an accurately ranked and
-    // filtered list without ever needing to flip Breakdown/Skills manually. Both fetch buttons
-    // hit the SAME underlying pool, so running it from either card benefits both shortlists.
-    const bindFetchStats = (which, buttonId, statusId, build) => {
+    // Fetches R5/Routine/SI (via tooltip.ajax.php, Section 4) only for players already on
+    // THIS shortlist, then rebuilds it with prefs read live from the inputs — scoped to what
+    // you're actually deciding on rather than the whole transfer-seen pool.
+    const bindFetchStats = (which, buttonId, statusId, build, list) => {
       bind(buttonId, async () => {
         const status = document.getElementById(statusId);
         const btn = document.getElementById(buttonId);
+        const ids = (list || []).map(p => String(p.id));
+        if (!ids.length) { if (status) status.textContent = 'Build the shortlist first.'; return; }
         if (btn) btn.disabled = true;
         try {
-          const result = await fetchFullStatsForPool((done, total, name) => {
+          const result = await fetchFullStatsForPool(ids, (done, total, name) => {
             if (status) status.textContent = `Fetching ${done}/${total}: ${name || '…'}`;
           });
-          if (status) status.textContent = `Fetched ${result.fetched} player(s)` + (result.remaining ? ` — ${result.remaining} more still incomplete, click again to continue` : ' — pool fully up to date') + '. Rebuilding…';
+          if (status) status.textContent = `Fetched ${result.fetched} player(s). Rebuilding…`;
           const prefs = readPrefsFromInputs(which);
           build(prefs);
         } catch (e) {
@@ -3259,8 +3181,8 @@
         renderScouting();
       });
     };
-    bindFetchStats('youth', 'tma-youth-fetchstats', 'tma-youth-status', buildYouthShortlist);
-    bindFetchStats('senior', 'tma-senior-fetchstats', 'tma-senior-status', buildSeniorShortlist);
+    bindFetchStats('youth', 'tma-youth-fetchstats', 'tma-youth-status', buildYouthShortlist, shortlist);
+    bindFetchStats('senior', 'tma-senior-fetchstats', 'tma-senior-status', buildSeniorShortlist, seniorList);
 
     bind('tma-youth-copy', () => {
       const text = (shortlist || []).map(p => `${p.name} · age ${p.age != null ? p.age : '?'} · R5 ${p.r5 != null ? p.r5.toFixed(1) : '—'} · ${playerLink(p)}`).join('\n');
@@ -3319,14 +3241,17 @@
    *  SECTION 8 — BOOT
    * ============================================================ */
 
-  // An individual player's profile page (/players/{id}/...) already gets its own inline
-  // Rou/SI/R5/breakdown card injected directly into the page (enhancePlayerDetailPage,
-  // Section 4) — the separate advisor dock has nothing squad-specific to add there and would
-  // just be a floating box in the way, so it's skipped entirely on this page type. Data
-  // capture (autoCaptureCurrentPage) still runs regardless.
+  // The dock is skipped entirely on /club/* and /players* pages — those already get their
+  // own inline injected UI (Rou/SI/R5 columns, the player-detail card) directly on the game
+  // page itself, so the floating dock would just be redundant chrome in the way. Background
+  // capture/parsing/caching (autoCaptureCurrentPage, column injection) still runs regardless.
+  function dockDisabledHere() {
+    const p = location.pathname;
+    return p.startsWith('/club/') || p.startsWith('/players');
+  }
   function boot() {
     injectStyle();
-    if (!/^\/players\/\d+/.test(location.pathname)) buildPanel();
+    if (!dockDisabledHere()) buildPanel();
     autoCaptureCurrentPage();
   }
 
