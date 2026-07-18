@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.1.0
+// @version      3.2.0
 // @description  A single visual advisor for TrophyManager. A single collapsible dock (bottom-right, no separate button) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard (data freshness + next/last match) on the homepage, Tactics on the tactics/players pages, Scouting on the transfer/scouts pages, Stadium on stadium/finances. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Surfaces Rou / SI / R5 columns (with development trend arrows) on the game's own player and transfer tables, and on any individual player's profile page a Physique/Tactical/Technical star breakdown, exact sale-price figures and a training-growth projector. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -11,6 +11,8 @@
 // @run-at       document-end
 // @homepageURL  https://tushantsharma.tools/tm-advisor
 // @supportURL   https://tushantsharma.tools/tm-advisor/support
+// @downloadURL  https://raw.githubusercontent.com/Jadax/tm-advisor/main/TM_Advisor.js
+// @updateURL    https://raw.githubusercontent.com/Jadax/tm-advisor/main/TM_Advisor.js
 // ==/UserScript==
 
 /* ================================================================
@@ -586,6 +588,29 @@
     }
   }
 
+  // A player's favposition string can list more than one eligible slot — e.g. "M/OM C"
+  // (M C and OM C sharing one side letter) or "OM L, F" (comma-joined, each segment carrying
+  // its own side). R5 is a per-position rating, so a dual-eligible player genuinely has TWO
+  // different R5s, not one — this parses either format into the short position codes
+  // getPositionIndex() expects, for every listed position, not just the first.
+  function parseFavPositionCodes(fp) {
+    if (!fp) return ['mc'];
+    const raw = String(fp).toUpperCase().trim();
+    if (raw.includes('GK')) return ['gk'];
+    const codes = [];
+    raw.split(',').forEach(segRaw => {
+      const seg = segRaw.trim();
+      if (!seg) return;
+      const m = seg.match(/^([A-Z/]+?)\s*([LCR])?$/);
+      const posPart = (m ? m[1] : seg).replace(/\s+/g, '');
+      const side = m && m[2] ? m[2] : '';
+      posPart.split('/').filter(Boolean).forEach(part => {
+        codes.push(part === 'F' ? 'f' : (part + side).toLowerCase());
+      });
+    });
+    return codes.length ? codes : ['mc'];
+  }
+
   // Ordered skill arrays the formula expects, per position type.
   function outfieldSkillArray(s) {
     return [s.str, s.sta, s.pac, s.mar, s.tac, s.wor, s.pos, s.pas, s.cro, s.tec, s.hea, s.fin, s.lon, s.set].map(Number);
@@ -1098,6 +1123,20 @@
   // the table) never produces duplicate columns.
   // Returns the number of data rows it actually decorated this pass — the observer uses
   // that to know whether the real table has rendered yet.
+  // The game's own player/squad tables are a fixed-width layout with no horizontal scroll —
+  // adding Rou/SI/R5 columns pushes the table wider than its container, so the new columns
+  // were getting silently clipped off the right edge with no way to reach them. Wrap the
+  // table's parent in a horizontal scroll container the first time we touch each table.
+  function ensureScrollableTable(table) {
+    if (table.dataset.tmaScrollable === '1') return;
+    table.dataset.tmaScrollable = '1';
+    const wrapper = table.parentElement;
+    if (!wrapper) return;
+    wrapper.style.overflowX = 'auto';
+    wrapper.style.maxWidth = '100%';
+    table.style.minWidth = 'max-content';
+  }
+
   function injectR5Columns(playersData, opts) {
     opts = opts || {};
     const showRou = opts.showRou !== false;
@@ -1137,6 +1176,7 @@
         // A table can have more than one header row (e.g. the squad page has a separate
         // "Goalkeepers" sub-header) — decorate every row that has <th> cells.
         [...table.querySelectorAll('tr')].filter(r => r.querySelector('th')).forEach(addHeaderCells);
+        ensureScrollableTable(table);
       }
 
       const p = byId[String(link.id)];
@@ -1280,31 +1320,45 @@
       const raw = await fetchPlayerTooltip(playerId);
       const p = normaliseTooltipPlayer(raw);
       if (!p) { _playerPageDone = false; return; }
-      ensureR5(p);
       const isGK = bucketFor(p.fp) === 'GK';
       const ageMonths = ageMonthsOf(p);
       const staPrice = p.asi != null && ageMonths ? calcSellToAgentPrice(Number(p.asi), ageMonths, isGK) : null;
       const maxPrice = p.asi != null && ageMonths ? calcMaxSellPrice(Number(p.asi), ageMonths, staPrice) : null;
       const cats = categoryBreakdown(p.skills, p.routine, isGK);
 
+      // A dual/tri-eligible favposition (e.g. "M/OM C") genuinely has a DIFFERENT R5 per
+      // position, not one number — compute and show every listed position separately rather
+      // than silently picking (or worse, defaulting to) just the first one.
+      const posCodes = parseFavPositionCodes(p.fp);
+      const skillArr = isGK ? gkSkillArray(p.skills) : outfieldSkillArray(p.skills);
+      const r5ByPosition = posCodes.map(code => {
+        const posIdx = getPositionIndex(code);
+        const r5 = (p.asi && !skillArr.some(isNaN)) ? calculateR5(posIdx, skillArr, Number(p.asi), p.routine || 0) : null;
+        return { label: code.toUpperCase(), r5 };
+      });
+
       const box = document.createElement('div');
       box.id = 'tma-player-card';
       box.style.cssText = 'margin:8px 0;padding:12px 14px;background:#20242988;border:1px solid #2c313780;border-radius:10px;color:#e4e7ea;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:12.5px;';
       const stat = (label, val) => `<div><div style="font-size:10px;color:#8a939c;text-transform:uppercase;letter-spacing:.04em;">${label}</div><div style="font-size:15px;font-weight:700;color:#7fb2e0;">${val}</div></div>`;
+      const r5Stat = r5ByPosition.length > 1
+        ? stat('R5', r5ByPosition.map(x => `${x.label} ${x.r5 != null ? x.r5.toFixed(1) : '-'}`).join(' / '))
+        : stat('R5', r5ByPosition[0] && r5ByPosition[0].r5 != null ? r5ByPosition[0].r5.toFixed(1) : '-');
       const statRow = stat('Routine', p.routine != null ? Number(p.routine).toFixed(1) : '-')
         + stat('SI', p.asi != null ? Number(p.asi).toLocaleString() : '-')
-        + stat('R5', (p._r5 != null && !isNaN(p._r5)) ? Number(p._r5).toFixed(1) : '-')
+        + r5Stat
         + (staPrice ? stat('Sell-to-Agent', Number(staPrice).toLocaleString()) : '')
         + (maxPrice ? stat('Max Sell Price', Number(maxPrice).toLocaleString()) : '')
         + '<div style="margin-left:auto;font-size:10px;color:#8a939c;align-self:center;">TM Advisor</div>';
 
       // Category breakdown — same 5-6 star categories the game's own player page shows
-      // (Physique/Tactical/Technical + role-specific extras), see Section 2C.
+      // (Physique/Tactical/Technical + role-specific extras), see Section 2C. Shows the
+      // numeric rating alongside the stars, not stars alone.
       const catChip = (label, val) => {
         const v = Math.max(0, Math.min(5, val || 0));
         const full = Math.floor(v), half = v - full >= 0.5;
         const stars = '★'.repeat(full) + (half ? '½' : '') + '☆'.repeat(Math.max(0, 5 - full - (half ? 1 : 0)));
-        return `<div style="min-width:88px;"><div style="font-size:10px;color:#8a939c;">${label}</div><div style="font-size:12px;color:#e0be6b;letter-spacing:1px;" title="${v.toFixed(2)}">${stars}</div></div>`;
+        return `<div style="min-width:100px;"><div style="font-size:10px;color:#8a939c;">${label}</div><div style="font-size:12px;color:#e0be6b;"><span style="letter-spacing:1px;">${stars}</span> <span style="color:#e4e7ea;">${v.toFixed(2)}</span></div></div>`;
       };
       const catRow = Object.entries(cats).map(([k, v]) => catChip(k, v)).join('');
 
@@ -3265,9 +3319,14 @@
    *  SECTION 8 — BOOT
    * ============================================================ */
 
+  // An individual player's profile page (/players/{id}/...) already gets its own inline
+  // Rou/SI/R5/breakdown card injected directly into the page (enhancePlayerDetailPage,
+  // Section 4) — the separate advisor dock has nothing squad-specific to add there and would
+  // just be a floating box in the way, so it's skipped entirely on this page type. Data
+  // capture (autoCaptureCurrentPage) still runs regardless.
   function boot() {
     injectStyle();
-    buildPanel();
+    if (!/^\/players\/\d+/.test(location.pathname)) buildPanel();
     autoCaptureCurrentPage();
   }
 
