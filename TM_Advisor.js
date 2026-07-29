@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.3.1
+// @version      3.4.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -2411,67 +2411,75 @@
    * ============================================================ */
 
   const STYLE = `
-  /* ---- Design tokens (change the theme in ONE place) ---- */
+  /* ---- Design tokens (change the theme in ONE place) ----
+     Warm-neutral dark base (slightly brown-grey, easier on the eyes than pure blue-black)
+     with a soft amber accent for warmth and a blue accent kept for links/positive values. */
   #tma-panel {
-    --tma-bg:#161a1f; --tma-bg-2:#1b2027; --tma-card:#1e242b80; --tma-line:#2b323b80;
-    --tma-gold:#79a8d6; --tma-lime:#5b8fc9; --tma-text:#e6e9ec; --tma-mute:#8a94a0;
-    --tma-red:#cf7a72; --tma-amber:#b79a68;
+    --tma-bg:#1a1a1d; --tma-bg-2:#202024; --tma-card:#25252a80; --tma-line:#33333a80;
+    --tma-gold:#e0a95f; --tma-lime:#6fae7c; --tma-text:#f1efec; --tma-mute:#9a9691;
+    --tma-red:#d97a70; --tma-amber:#e0a95f; --tma-accent:#7fb2e0;
+    --tma-ease:cubic-bezier(.4,0,.2,1);
   }
   /* ---- Panel shell: the ONLY floating element — always present, docked bottom-right.
      Collapsed by default down to just its header; expands in place, nothing else to summon. ---- */
   #tma-panel { position:fixed; right:22px; bottom:22px; z-index:999999; width:412px; max-height:78vh; overflow:hidden;
     background:var(--tma-bg); color:var(--tma-text); border-radius:14px;
-    border:1px solid #2c313780; box-shadow:0 16px 40px rgba(0,0,0,.45);
+    border:1px solid #38383f80; box-shadow:0 18px 44px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.3);
     font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif; display:flex; flex-direction:column;
-    transition:max-height .22s ease; }
+    transition:max-height .2s var(--tma-ease), box-shadow .2s var(--tma-ease); }
+  #tma-panel:not(.tma-collapsed) { box-shadow:0 22px 52px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.35); }
   #tma-panel.tma-collapsed { max-height:60px; }
   #tma-panel.tma-collapsed .tma-tabs, #tma-panel.tma-collapsed .tma-body { display:none; }
+  #tma-panel.tma-collapsed .tma-head:hover { background:#242428; }
   /* ---- Header (sticky, draggable, doubles as the expand/collapse target) ---- */
-  .tma-head { padding:12px 14px 0; background:var(--tma-bg-2); border-bottom:1px solid #2c313780;
-    cursor:move; user-select:none; position:relative; z-index:2; flex:0 0 auto; }
+  .tma-head { padding:12px 14px 0; background:var(--tma-bg-2); border-bottom:1px solid #33333a80;
+    cursor:move; user-select:none; position:relative; z-index:2; flex:0 0 auto; transition:background .15s var(--tma-ease); }
   .tma-head-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
   .tma-title { font-size:15px; font-weight:700; color:var(--tma-text); letter-spacing:.1px; display:flex; align-items:center; gap:6px; }
   .tma-title .tma-mini { font-weight:400; }
   .tma-head-actions { display:flex; align-items:center; gap:2px; flex-shrink:0; }
   .tma-icon-btn { cursor:pointer; width:24px; height:24px; display:flex; align-items:center; justify-content:center;
-    color:var(--tma-mute); font-size:13px; border-radius:6px; transition:color .15s, background .15s; }
-  .tma-icon-btn:hover { color:var(--tma-text); background:#ffffff10; }
-  .tma-chevron { display:inline-block; transition:transform .2s ease; }
+    color:var(--tma-mute); font-size:13px; border-radius:6px; transition:color .15s var(--tma-ease), background .15s var(--tma-ease), transform .1s var(--tma-ease); }
+  .tma-icon-btn:hover { color:var(--tma-text); background:#ffffff12; }
+  .tma-icon-btn:active { transform:scale(.9); }
+  .tma-chevron { display:inline-block; transition:transform .2s var(--tma-ease); }
   #tma-panel.tma-collapsed .tma-chevron { transform:rotate(-90deg); }
   .tma-sub { font-size:11px; color:var(--tma-mute); margin-top:2px; padding-bottom:10px; display:flex; align-items:center; gap:6px; }
-  .tma-ctx-dot { width:6px; height:6px; border-radius:50%; background:var(--tma-lime); box-shadow:0 0 0 0 #5b8fc966;
+  .tma-ctx-dot { width:6px; height:6px; border-radius:50%; background:var(--tma-lime); box-shadow:0 0 0 0 #6fae7c66;
     animation:tma-pulse 2s infinite; display:inline-block; flex-shrink:0; }
-  @keyframes tma-pulse { 0%{box-shadow:0 0 0 0 #5b8fc966;} 70%{box-shadow:0 0 0 5px #5b8fc900;} 100%{box-shadow:0 0 0 0 #5b8fc900;} }
+  @keyframes tma-pulse { 0%{box-shadow:0 0 0 0 #6fae7c66;} 70%{box-shadow:0 0 0 5px #6fae7c00;} 100%{box-shadow:0 0 0 0 #6fae7c00;} }
   .tma-tabs { display:flex; gap:2px; padding:0 8px; overflow-x:auto; scrollbar-width:none; }
   .tma-tabs::-webkit-scrollbar { display:none; }
   .tma-tab { flex:1 0 auto; min-width:64px; text-align:center; padding:8px 6px; font-size:11.5px; border-radius:8px 8px 0 0; cursor:pointer;
-    background:transparent; color:var(--tma-mute); font-weight:600; position:relative; transition:color .15s, background .15s; white-space:nowrap; }
-  .tma-tab:hover { color:var(--tma-text); background:#ffffff08; }
+    background:transparent; color:var(--tma-mute); font-weight:600; position:relative; transition:color .15s var(--tma-ease), background .15s var(--tma-ease); white-space:nowrap; }
+  .tma-tab:hover { color:var(--tma-text); background:#ffffff0a; }
   .tma-tab.active { background:var(--tma-bg); color:var(--tma-gold); font-weight:700; }
   .tma-tab.active:after { content:""; position:absolute; left:18%; right:18%; bottom:-1px; height:2px; border-radius:2px; background:var(--tma-gold); }
   /* ---- Scrollable body ---- */
-  .tma-body { padding:12px 14px 16px; overflow-y:auto; flex:1 1 auto; scrollbar-width:thin; scrollbar-color:#3f6f9a transparent; }
+  .tma-body { padding:12px 14px 16px; overflow-y:auto; flex:1 1 auto; scrollbar-width:thin; scrollbar-color:#7a7a8266 transparent;
+    animation:tma-fade-in .16s var(--tma-ease); }
+  @keyframes tma-fade-in { from{ opacity:0; transform:translateY(2px);} to{ opacity:1; transform:translateY(0);} }
   .tma-body::-webkit-scrollbar { width:7px; }
-  .tma-body::-webkit-scrollbar-thumb { background:#3f6f9a66; border-radius:4px; }
-  .tma-body::-webkit-scrollbar-thumb:hover { background:#3f6f9aaa; }
+  .tma-body::-webkit-scrollbar-thumb { background:#7a7a8255; border-radius:4px; }
+  .tma-body::-webkit-scrollbar-thumb:hover { background:#7a7a8299; }
   /* ---- Cards ---- */
   .tma-card { background:var(--tma-card); border:1px solid var(--tma-line); border-radius:11px;
-    padding:12px 13px; margin-bottom:9px; transition:border-color .15s; }
-  .tma-card:hover { border-color:#3f6f9a55; }
+    padding:12px 13px; margin-bottom:9px; transition:border-color .15s var(--tma-ease), transform .15s var(--tma-ease), box-shadow .15s var(--tma-ease); }
+  .tma-card:hover { border-color:#e0a95f4d; transform:translateY(-1px); box-shadow:0 4px 14px rgba(0,0,0,.25); }
   .tma-card h4 { margin:0 0 8px; font-size:12.5px; color:var(--tma-text); display:flex; justify-content:space-between; align-items:center; gap:8px; font-weight:700; letter-spacing:.1px; }
-  .tma-row { display:flex; justify-content:space-between; align-items:center; font-size:12.5px; padding:5px 0; border-bottom:1px solid #ffffff08; gap:8px; }
+  .tma-row { display:flex; justify-content:space-between; align-items:center; font-size:12.5px; padding:5px 0; border-bottom:1px solid #ffffff0a; gap:8px; }
   .tma-row:last-child { border-bottom:none; }
   .tma-dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:6px; flex-shrink:0; }
-  .dot-green{ background:var(--tma-lime); } .dot-amber{ background:var(--tma-amber); } .dot-red{ background:var(--tma-red); } .dot-grey{ background:#4a5a4c; }
+  .dot-green{ background:var(--tma-lime); } .dot-amber{ background:var(--tma-amber); } .dot-red{ background:var(--tma-red); } .dot-grey{ background:#57575e; }
   /* ---- Buttons ---- */
-  .tma-btn { background:#2c4f76; color:#eef3f8; border:1px solid #7fb2e040; border-radius:8px;
+  .tma-btn { background:linear-gradient(180deg,#d99a4e,#c98a3e); color:#241a0d; border:1px solid #e0a95f66; border-radius:8px;
     padding:9px 12px; font-size:12.5px; cursor:pointer; font-weight:700; width:100%; margin-top:8px; letter-spacing:.1px;
-    transition:filter .15s, transform .1s; }
-  .tma-btn:hover { filter:brightness(1.12); }
-  .tma-btn:active { transform:translateY(1px); }
-  .tma-btn:disabled { opacity:.5; cursor:not-allowed; filter:none; }
-  .tma-btn.secondary { background:#1c232b; color:var(--tma-mute); font-weight:600; }
-  .tma-btn.secondary:hover { color:var(--tma-text); background:#232c36; }
+    transition:filter .15s var(--tma-ease), transform .1s var(--tma-ease), box-shadow .15s var(--tma-ease); }
+  .tma-btn:hover { filter:brightness(1.08); box-shadow:0 3px 10px rgba(224,169,95,.25); transform:translateY(-1px); }
+  .tma-btn:active { transform:translateY(1px); filter:brightness(.97); }
+  .tma-btn:disabled { opacity:.5; cursor:not-allowed; filter:none; transform:none; box-shadow:none; }
+  .tma-btn.secondary { background:#24242a; color:var(--tma-mute); font-weight:600; border-color:#3a3a42; }
+  .tma-btn.secondary:hover { color:var(--tma-text); background:#2c2c33; box-shadow:none; }
   /* ---- Pitch ---- */
   .tma-pitch { display:flex; flex-direction:column; gap:7px; border-radius:11px; padding:13px 8px; position:relative;
     background:linear-gradient(180deg,#0d260f,#102a13);
@@ -2486,14 +2494,14 @@
   .tma-role-tag { font-size:9.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--tma-mute); width:42px; flex-shrink:0; }
   .tma-pos { font-size:9.5px; color:var(--tma-mute); text-transform:uppercase; letter-spacing:.03em; }
   .tma-empty { color:var(--tma-red); font-style:italic; }
-  .tma-reason { font-size:11.4px; color:#b7c4d6; margin:5px 0; padding-left:14px; position:relative; line-height:1.45; }
+  .tma-reason { font-size:11.4px; color:#c9c4bd; margin:5px 0; padding-left:14px; position:relative; line-height:1.45; }
   .tma-reason:before { content:"–"; position:absolute; left:0; color:var(--tma-mute); }
-  .tma-badge { font-size:9.5px; padding:2px 7px; border-radius:20px; background:#1c2c3d; color:#9fc3e0; white-space:nowrap; font-weight:600; }
+  .tma-badge { font-size:9.5px; padding:2px 7px; border-radius:20px; background:#2a2530; color:var(--tma-accent); white-space:nowrap; font-weight:600; }
   .tma-progress { font-size:11px; color:var(--tma-mute); margin-top:6px; }
   .tma-mini { font-size:10.6px; color:var(--tma-mute); line-height:1.45; }
   .tma-goodval { color:var(--tma-lime); font-weight:700; }
   /* ---- Empty-state helper ---- */
-  .tma-empty-state { text-align:center; padding:24px 14px; color:var(--tma-mute); }
+  .tma-empty-state { text-align:center; padding:24px 14px; color:var(--tma-mute); animation:tma-fade-in .2s var(--tma-ease); }
   .tma-empty-state .tma-es-icon { font-size:26px; opacity:.6; display:block; margin-bottom:8px; }
   `;
 
