@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.4.0
+// @version      3.5.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -41,11 +41,12 @@
  *                                       Sell-to-Agent/Max Sell Price)
  *   SECTION 3  NETWORK REFRESH       (fetch other pages, no nav)
  *   SECTION 4  LIVE-PAGE AUTO CAPTURE (+ Rou/SI/R5 columns on players
- *                                       & transfer tables; player-profile
- *                                       card with breakdown/valuation;
- *                                       match-page R5 overlay + full
- *                                       match stats & goal/card/injury
- *                                       timeline)
+ *                                       & transfer tables; Keep/Release
+ *                                       verdict on youth-development recruit
+ *                                       rows; player-profile card with
+ *                                       breakdown/valuation; match-page R5
+ *                                       overlay + full match stats &
+ *                                       goal/card/injury timeline)
  *   SECTION 5  TACTICS ENGINE        (formation + settings picker;
  *                                       position-aware substitution orders)
  *   SECTION 5B YOUTH FINDER          (transfer-list-only talent shortlist)
@@ -1246,6 +1247,52 @@
     setTimeout(() => observer.disconnect(), 300000);
   }
 
+  // ---- Youth Development recruit advisor ----
+  // The weekly /youth-development/ pull lists newly generated recruits who aren't signed yet.
+  // Reuses the SAME YOUTH_CRITERIA hard floors (Section 5B) that already define "worth
+  // keeping" for the transfer-list Youth Finder — one set of thresholds for youth, not two —
+  // to stamp a Keep/Release verdict directly on each recruit row. The pull page only shows
+  // partial data (stars, not raw skills), so full skills are fetched per recruit via
+  // tooltip.ajax.php (already confirmed to work for any player_id, see fetchPlayerTooltip
+  // above). filterYouth/YOUTH_CRITERIA are defined later in the file (Section 5B) but hoisted
+  // function declarations make them available here.
+  async function enhanceYouthDevelopmentPage() {
+    const rows = [...document.querySelectorAll('tr')].filter(tr => findPlayerLinkInRow(tr) && !tr.dataset.tmaYouthDone);
+    if (!rows.length) return;
+    const table = rows[0].closest('table');
+    if (table) {
+      const headerRow = [...table.querySelectorAll('tr')].find(r => r.querySelector('th'));
+      if (headerRow && !headerRow.querySelector('.tma-col-verdict')) {
+        const mk = (label, cls) => { const th = document.createElement('th'); th.textContent = label; th.className = cls; th.align = 'center'; headerRow.appendChild(th); };
+        mk('Rou', 'tma-col-rou'); mk('SI', 'tma-col-si'); mk('R5', 'tma-col-r5'); mk('Verdict', 'tma-col-verdict');
+      }
+      ensureScrollableTable(table);
+    }
+    for (const tr of rows) {
+      tr.dataset.tmaYouthDone = '1';
+      const link = findPlayerLinkInRow(tr);
+      if (!link) continue;
+      try {
+        const raw = await fetchPlayerTooltip(link.id);
+        const p = normaliseTooltipPlayer(raw);
+        if (!p) continue;
+        ensureR5(p);
+        const keep = filterYouth([p], YOUTH_CRITERIA).length > 0;
+        const mkCell = (text, color) => {
+          const td = document.createElement('td');
+          td.align = 'center';
+          td.textContent = text;
+          if (color) { td.style.color = color; td.style.fontWeight = 'bold'; }
+          tr.appendChild(td);
+        };
+        mkCell(p.routine != null ? Number(p.routine).toFixed(1) : '-');
+        mkCell(p.asi != null ? Number(p.asi).toLocaleString() : '-');
+        mkCell((p._r5 != null && !isNaN(p._r5)) ? Number(p._r5).toFixed(1) : '-', '#e0a95f');
+        mkCell(keep ? 'KEEP' : 'RELEASE', keep ? '#6fae7c' : '#d97a70');
+      } catch (e) { console.warn('TM Advisor: youth-development row failed', e); }
+    }
+  }
+
   // ---- Player detail page overlay (Rou / SI / R5 for ANY player, not just your squad) ----
   // /ajax/tooltip.ajax.php?player_id=X (confirmed via community scripts that already use it
   // to power their own player-page overlays) returns the full skill set for any player_id —
@@ -1409,6 +1456,15 @@
         // Transfer list results load in via the page's own search; enhance them live with
         // SI + R5 columns (proof-backed, read straight from the rendered rows).
         enhanceTransferPage();
+      }
+      else if (path.startsWith('/youth-development')) {
+        // Recruit rows can load in after the initial pass (new week's pull, page re-render);
+        // same debounced-observer pattern as enhanceTransferPage.
+        let timer = null;
+        enhanceYouthDevelopmentPage();
+        const observer = new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(enhanceYouthDevelopmentPage, 150); });
+        observer.observe(document.body, { childList: true, subtree: true });
+        setTimeout(() => observer.disconnect(), 300000);
       }
       else if (path.startsWith('/matches/')) {
         const d = parseMatchPage(document);
@@ -1718,8 +1774,8 @@
     const mid = take(p => (bucketFor(p.fp) === 'M' || bucketFor(p.fp) === 'OM') && sideFor(p.fp) === 'C');
     const fc = take(p => bucketFor(p.fp) === 'F');
     const named = [
-      { role: 'GK', player: gk }, { role: 'DEF', player: def }, { role: 'MID', player: mid },
-      { role: 'WING', player: wing }, { role: 'FC', player: fc },
+      { role: 'FC', player: fc }, { role: 'WING', player: wing }, { role: 'MID', player: mid },
+      { role: 'DEF', player: def }, { role: 'GK', player: gk },
     ];
     const extras = remainingPlayers.filter(p => !used.has(p.id)).sort((a, b) => b._r5 - a._r5).slice(0, 2);
     return { named, extras };
@@ -2660,7 +2716,7 @@
     if (p.startsWith('/matches/')) return 'dash';           // last-match stats live on the dashboard
     if (p.startsWith('/stadium')) return 'stadium';
     if (p.startsWith('/finances')) return 'stadium';         // finances feed the stadium ROI view
-    if (p.startsWith('/transfer') || p.startsWith('/shortlist') || p.startsWith('/scouts') || p.startsWith('/youth-development')) return 'scouting';
+    if (p.startsWith('/transfer') || p.startsWith('/shortlist') || p.startsWith('/scouts')) return 'scouting';
     // An individual player's profile page (e.g. /players/142683102/...) isn't your squad —
     // the Rou/SI/R5/breakdown card is already injected directly onto that page (Section 4),
     // so the side panel has nothing specific to show; fall through to the Dashboard default
@@ -2716,15 +2772,15 @@
 
     body.innerHTML = `
       <div class="tma-card">
-        <h4>Next Match</h4>
-        ${nmHtml}
-      </div>
-      ${lastResultHtml}
-      <div class="tma-card">
         <h4>Data Freshness</h4>
         ${rows}
         <button class="tma-btn" id="tma-refresh">🔄 Update All Now</button>
         <div class="tma-progress" id="tma-progress"></div>
+      </div>
+      ${lastResultHtml}
+      <div class="tma-card">
+        <h4>Next Match</h4>
+        ${nmHtml}
       </div>
     `;
     document.getElementById('tma-refresh').addEventListener('click', async () => {
@@ -2790,9 +2846,9 @@
 
     const rolesHtml = `
       <div class="tma-row"><span>Captain</span><span class="tma-goodval">${roles.captain ? roles.captain.name : '—'}</span></div>
-      <div class="tma-row"><span>Free-kick taker</span><span class="tma-goodval">${roles.freeKick ? roles.freeKick.name : '—'}</span></div>
       <div class="tma-row"><span>Corner taker</span><span class="tma-goodval">${roles.corner ? roles.corner.name : '—'}</span></div>
       <div class="tma-row"><span>Penalty taker</span><span class="tma-goodval">${roles.penalty ? roles.penalty.name : '—'}</span></div>
+      <div class="tma-row"><span>Free-kick taker</span><span class="tma-goodval">${roles.freeKick ? roles.freeKick.name : '—'}</span></div>
     `;
 
     // Conditional orders in TM are exactly: one Event + one Score state + one Order,
@@ -2841,11 +2897,11 @@
       const natural = posLabel(inBucket, inSide);
       let posNote;
       if (inBucket === slotBucket && inSide === slotSide) {
-        posNote = ' — plays ' + vacated + ' (his natural position, nothing to change on the sub screen)';
+        posNote = ' — plays ' + vacated;
       } else if (inBucket === slotBucket) {
-        posNote = ' — plays ' + vacated + ' (same role, change flank: ' + (SIDE_LABEL[inSide] || 'Central') + ' → ' + (SIDE_LABEL[slotSide] || 'Central') + ')';
+        posNote = ' — plays ' + (SIDE_LABEL[slotSide] || 'Central') + ' ' + (POS_BUCKET_LABEL[slotBucket] || slotBucket);
       } else {
-        posNote = ' — on the sub screen, set his position to ' + natural + ' (his own natural role), NOT the vacated ' + vacated + ': leaving him at ' + vacated + ' plays him off-position and costs rating';
+        posNote = ' — set his position to ' + natural;
       }
       return 'Substitution: ' + inP.name + ' ON for ' + out.name + ' OFF' + posNote;
     };
@@ -3256,7 +3312,7 @@
   // capture/parsing/caching (autoCaptureCurrentPage, column injection) still runs regardless.
   function dockDisabledHere() {
     const p = location.pathname;
-    return p.startsWith('/club/') || p.startsWith('/players');
+    return p.startsWith('/club/') || p.startsWith('/players') || p.startsWith('/youth-development');
   }
   function boot() {
     injectStyle();
