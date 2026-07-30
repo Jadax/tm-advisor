@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.5.0
+// @version      3.5.1
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -72,10 +72,16 @@
   const FOCUS_SIDE = { 1: 'Balanced', 2: 'Left', 3: 'Central', 4: 'Right' };
 
   // Position bucket helpers (favourite-position strings look like "D C", "OM L", "DM/D C", "F" etc.)
-  const POS_BUCKETS = ['GK', 'D', 'DM', 'M', 'OM', 'F'];
 
   const CACHE_KEY_PREFIX = 'tmAdvisor_';
   const now = () => Date.now();
+  // Escape any GAME-SUPPLIED string before it goes into an innerHTML template. Club names and
+  // manager names are chosen by other players, so they are attacker-controlled: a club named
+  // `<img src=x onerror=...>` would otherwise execute in OUR page context, with our session,
+  // the moment they show up as our next opponent. Numbers we compute ourselves don't need it.
+  const esc = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const clubId = (window.SESSION && SESSION.id) ? String(SESSION.id) : 'unknown';
   // Your club's own nation code (e.g. "za"), straight from the game's own SESSION var —
   // used to flag which transfer-list/scouted players are home-nation vs. foreign.
@@ -92,7 +98,32 @@
     try { return JSON.parse(localStorage.getItem(cacheKey())) || {}; }
     catch (e) { return {}; }
   }
-  function saveCache(c) { localStorage.setItem(cacheKey(), JSON.stringify(c)); }
+  // `transferSeen` accumulates every player you've ever scrolled past on the transfer list and
+  // is never otherwise pruned, so it's the one slice that grows without bound — left alone it
+  // eventually blows localStorage's ~5MB quota, at which point EVERY setItem throws and all
+  // caching silently stops. Cap it at the most-recently-seen N, and on a quota failure prune
+  // hard and retry once rather than losing the whole cache.
+  const TRANSFER_SEEN_CAP = 1500;
+  function pruneTransferSeen(c, cap) {
+    const slice = c.transferSeen;
+    if (!slice || !slice.data) return false;
+    const entries = Object.entries(slice.data);
+    if (entries.length <= cap) return false;
+    entries.sort((a, b) => (b[1]._seen || 0) - (a[1]._seen || 0));
+    slice.data = Object.fromEntries(entries.slice(0, cap));
+    return true;
+  }
+  function saveCache(c) {
+    pruneTransferSeen(c, TRANSFER_SEEN_CAP);
+    try {
+      localStorage.setItem(cacheKey(), JSON.stringify(c));
+    } catch (e) {
+      if (pruneTransferSeen(c, Math.floor(TRANSFER_SEEN_CAP / 3))) {
+        try { localStorage.setItem(cacheKey(), JSON.stringify(c)); return; } catch (e2) {}
+      }
+      console.warn('TM Advisor: cache write failed (storage full?)', e);
+    }
+  }
   function setSlice(name, data) {
     const c = loadCache();
     c[name] = { t: now(), data };
@@ -523,6 +554,7 @@
         bid: rec.bid || prev.bid || null, time: rec.time || prev.time || null,
         nat: nat || prev.nat || null,
         skills: Object.assign({}, prev.skills || {}),
+        _seen: now(), // recency key for pruneTransferSeen (Section 1)
       };
       TL_SKILL_KEYS.forEach(sk => { if (rec[sk] != null && rec[sk] !== '') { const v = parseInt(rec[sk], 10); if (!isNaN(v)) merged.skills[sk] = v; } });
       store[id] = merged;
@@ -1125,6 +1157,27 @@
     table.style.minWidth = 'max-content';
   }
 
+  // The two primitives every injected column uses — shared by the players/opponent/transfer
+  // tables (injectR5Columns) and the youth-development recruit table, so an appended cell
+  // looks and behaves the same everywhere. `chipHtml` is trusted (always built internally);
+  // `text` goes through textContent, never innerHTML.
+  function appendHeaderCell(headerRow, label, cls) {
+    const th = document.createElement('th');
+    th.textContent = label; th.className = cls; th.align = 'center';
+    headerRow.appendChild(th);
+    return th;
+  }
+  function appendCell(tr, text, opts) {
+    opts = opts || {};
+    const td = document.createElement('td');
+    td.align = 'center';
+    td.textContent = text;
+    if (opts.color) { td.style.color = opts.color; td.style.fontWeight = 'bold'; }
+    if (opts.chipHtml) td.insertAdjacentHTML('beforeend', opts.chipHtml);
+    tr.appendChild(td);
+    return td;
+  }
+
   function injectR5Columns(playersData, opts) {
     opts = opts || {};
     const showRou = opts.showRou !== false;
@@ -1147,10 +1200,9 @@
 
     const addHeaderCells = (headerRow) => {
       if (headerRow.querySelector('.tma-col-r5')) return; // already done
-      const mk = (label, cls) => { const th = document.createElement('th'); th.textContent = label; th.className = cls; th.align = 'center'; headerRow.appendChild(th); };
-      if (showRou) mk('Rou', 'tma-col-rou');
-      if (showSI) mk('SI', 'tma-col-si');
-      mk('R5', 'tma-col-r5');
+      if (showRou) appendHeaderCell(headerRow, 'Rou', 'tma-col-rou');
+      if (showSI) appendHeaderCell(headerRow, 'SI', 'tma-col-si');
+      appendHeaderCell(headerRow, 'R5', 'tma-col-r5');
     };
 
     let decorated = 0;
@@ -1169,15 +1221,7 @@
 
       const p = byId[String(link.id)];
       const trend = (showTrend && p) ? playerTrend(p.id) : null;
-      const mkCell = (text, gold, chipHtml) => {
-        const td = document.createElement('td');
-        td.align = 'center';
-        if (gold) { td.style.color = '#7fb2e0'; td.style.fontWeight = 'bold'; }
-        // chipHtml is trusted (built internally); text is escaped by using textContent first.
-        td.textContent = text;
-        if (chipHtml) td.insertAdjacentHTML('beforeend', chipHtml);
-        tr.appendChild(td);
-      };
+      const mkCell = (text, gold, chipHtml) => appendCell(tr, text, { color: gold ? '#7fb2e0' : null, chipHtml });
       if (showRou) mkCell((p && p.routine != null) ? Number(p.routine).toFixed(1) : '-', false, trend ? trendChip(trend.routine) : '');
       if (showSI) mkCell((p && p.asi != null) ? Number(p.asi).toLocaleString() : '-', false, trend ? trendChip(trend.asi) : '');
       mkCell((p && p._r5 != null && !isNaN(p._r5)) ? Number(p._r5).toFixed(1) : '-', true, trend ? trendChip(trend.r5) : '');
@@ -1256,40 +1300,49 @@
   // tooltip.ajax.php (already confirmed to work for any player_id, see fetchPlayerTooltip
   // above). filterYouth/YOUTH_CRITERIA are defined later in the file (Section 5B) but hoisted
   // function declarations make them available here.
+  const YOUTH_ROW_FETCH_CAP = 40; // a weekly pull is ~10-20 recruits; the cap is a runaway guard
   async function enhanceYouthDevelopmentPage() {
-    const rows = [...document.querySelectorAll('tr')].filter(tr => findPlayerLinkInRow(tr) && !tr.dataset.tmaYouthDone);
+    const rows = [...document.querySelectorAll('tr')]
+      .filter(tr => findPlayerLinkInRow(tr) && !tr.dataset.tmaYouthDone)
+      .slice(0, YOUTH_ROW_FETCH_CAP);
     if (!rows.length) return;
     const table = rows[0].closest('table');
     if (table) {
       const headerRow = [...table.querySelectorAll('tr')].find(r => r.querySelector('th'));
       if (headerRow && !headerRow.querySelector('.tma-col-verdict')) {
-        const mk = (label, cls) => { const th = document.createElement('th'); th.textContent = label; th.className = cls; th.align = 'center'; headerRow.appendChild(th); };
-        mk('Rou', 'tma-col-rou'); mk('SI', 'tma-col-si'); mk('R5', 'tma-col-r5'); mk('Verdict', 'tma-col-verdict');
+        appendHeaderCell(headerRow, 'Rou', 'tma-col-rou');
+        appendHeaderCell(headerRow, 'SI', 'tma-col-si');
+        appendHeaderCell(headerRow, 'R5', 'tma-col-r5');
+        appendHeaderCell(headerRow, 'Verdict', 'tma-col-verdict');
       }
       ensureScrollableTable(table);
     }
-    for (const tr of rows) {
+    // Claim every row and create its cells SYNCHRONOUSLY, before the first await. The
+    // MutationObserver that drives this re-fires on our own cell appends; if rows were only
+    // claimed as the async loop reached them, a re-entrant call would grab the not-yet-reached
+    // ones and append a second set of cells to them. Placeholder cells also mean a row whose
+    // fetch fails still has the right column count instead of shifting under the headings.
+    const pending = rows.map(tr => {
       tr.dataset.tmaYouthDone = '1';
-      const link = findPlayerLinkInRow(tr);
-      if (!link) continue;
+      return { link: findPlayerLinkInRow(tr), cells: ['…', '…', '…', '…'].map(t => appendCell(tr, t)) };
+    });
+    for (const { link, cells } of pending) {
+      if (!link) { cells.forEach(td => { td.textContent = '-'; }); continue; }
       try {
-        const raw = await fetchPlayerTooltip(link.id);
-        const p = normaliseTooltipPlayer(raw);
-        if (!p) continue;
+        const p = normaliseTooltipPlayer(await fetchPlayerTooltip(link.id));
+        if (!p) { cells.forEach(td => { td.textContent = '-'; }); continue; }
         ensureR5(p);
         const keep = filterYouth([p], YOUTH_CRITERIA).length > 0;
-        const mkCell = (text, color) => {
-          const td = document.createElement('td');
-          td.align = 'center';
-          td.textContent = text;
-          if (color) { td.style.color = color; td.style.fontWeight = 'bold'; }
-          tr.appendChild(td);
-        };
-        mkCell(p.routine != null ? Number(p.routine).toFixed(1) : '-');
-        mkCell(p.asi != null ? Number(p.asi).toLocaleString() : '-');
-        mkCell((p._r5 != null && !isNaN(p._r5)) ? Number(p._r5).toFixed(1) : '-', '#e0a95f');
-        mkCell(keep ? 'KEEP' : 'RELEASE', keep ? '#6fae7c' : '#d97a70');
-      } catch (e) { console.warn('TM Advisor: youth-development row failed', e); }
+        cells[0].textContent = p.routine != null ? Number(p.routine).toFixed(1) : '-';
+        cells[1].textContent = p.asi != null ? Number(p.asi).toLocaleString() : '-';
+        cells[2].textContent = (p._r5 != null && !isNaN(p._r5)) ? Number(p._r5).toFixed(1) : '-';
+        cells[2].style.color = '#e0a95f'; cells[2].style.fontWeight = 'bold';
+        cells[3].textContent = keep ? 'KEEP' : 'RELEASE';
+        cells[3].style.color = keep ? '#6fae7c' : '#d97a70'; cells[3].style.fontWeight = 'bold';
+      } catch (e) {
+        cells.forEach(td => { td.textContent = '-'; });
+        console.warn('TM Advisor: youth-development row failed', e);
+      }
     }
   }
 
@@ -1593,8 +1646,8 @@
         box.style.cssText = 'margin:8px auto;max-width:640px;background:#161c22;border:1px solid #2f7d3266;border-radius:10px;padding:10px 14px;color:#e4e7ea;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;';
         const col = (s) => s ? `avg R5 <b style="color:#7fb2e0">${s.r5.toFixed(1)}</b> · SI ${Math.round(s.asi).toLocaleString()} · Rou ${s.routine.toFixed(1)}` : 'n/a';
         box.innerHTML = `<div style="display:flex;justify-content:space-between;font-size:12px;">
-          <div><b>${match.club.home.club_name || 'Home'}</b><br>${col(homeSum)}</div>
-          <div style="text-align:right;"><b>${match.club.away.club_name || 'Away'}</b><br>${col(awaySum)}</div>
+          <div><b>${esc(match.club.home.club_name || 'Home')}</b><br>${col(homeSum)}</div>
+          <div style="text-align:right;"><b>${esc(match.club.away.club_name || 'Away')}</b><br>${col(awaySum)}</div>
         </div><div style="font-size:10px;color:#8a939c;margin-top:4px;">TM Advisor · accurate R5 from each club's real skills</div>`;
         const anchor = document.querySelector('.main_center') || document.body;
         anchor.insertBefore(box, anchor.firstChild);
@@ -2745,7 +2798,7 @@
       }).join('');
 
     const nm = c.home && c.home.data && c.home.data.nextMatch;
-    const nmHtml = nm ? `<div class="tma-mini">${nm.home.name} vs ${nm.away.name}<br>${nm.when || ''}</div>` : `<div class="tma-mini">No data yet.</div>`;
+    const nmHtml = nm ? `<div class="tma-mini">${esc(nm.home.name)} vs ${esc(nm.away.name)}<br>${esc(nm.when || '')}</div>` : `<div class="tma-mini">No data yet.</div>`;
 
     const lastResult = c.lastMatchResult;
     const lastResultHtml = lastResult ? (() => {
@@ -2753,7 +2806,7 @@
       const st = d.stats;
       const statRow = (label, h, a) => (h != null || a != null) ? `<div class="tma-row"><span class="tma-goodval">${h != null ? h : '–'}</span><span class="tma-mini">${label}</span><span class="tma-goodval">${a != null ? a : '–'}</span></div>` : '';
       const statsBlock = st ? `
-        <div class="tma-row" style="font-weight:700;"><span>${d.home}</span><span class="tma-mini">vs</span><span>${d.away}</span></div>
+        <div class="tma-row" style="font-weight:700;"><span>${esc(d.home)}</span><span class="tma-mini">vs</span><span>${esc(d.away)}</span></div>
         ${statRow('Possession %', st.possession && st.possession.home, st.possession && st.possession.away)}
         ${statRow('Shots', st.shots.home, st.shots.away)}
         ${statRow('On target', st.shotsOnTarget.home, st.shotsOnTarget.away)}
@@ -2764,9 +2817,9 @@
       const glyph = { goal: '⚽', yellow: '🟨', red: '🟥', yellow_red: '🟨🟥', injury: '🚑' };
       const timelineBlock = (d.timeline && d.timeline.length) ? `
         <div class="tma-mini" style="margin-top:6px;">Timeline</div>
-        ${d.timeline.map(ev => `<div class="tma-row"><span class="tma-mini">${ev.minute}'</span><span>${glyph[ev.type] || '•'} ${ev.player}${ev.score ? ' <span class="tma-goodval">(' + ev.score.home + '-' + ev.score.away + ')</span>' : ''}</span><span class="tma-mini">${ev.side || ''}</span></div>`).join('')}` : '';
+        ${d.timeline.map(ev => `<div class="tma-row"><span class="tma-mini">${esc(ev.minute)}'</span><span>${glyph[ev.type] || '•'} ${esc(ev.player)}${ev.score ? ' <span class="tma-goodval">(' + esc(ev.score.home) + '-' + esc(ev.score.away) + ')</span>' : ''}</span><span class="tma-mini">${esc(ev.side || '')}</span></div>`).join('')}` : '';
       return `<div class="tma-card"><h4>Last Match Seen <span class="tma-mini">(${ago(lastResult.t)})</span></h4>
-        <div class="tma-mini" style="text-align:center;font-size:14px;color:#7fb2e0;margin-bottom:4px;">${d.home} ${d.homeGoals} – ${d.awayGoals} ${d.away}</div>
+        <div class="tma-mini" style="text-align:center;font-size:14px;color:#7fb2e0;margin-bottom:4px;">${esc(d.home)} ${esc(d.homeGoals)} – ${esc(d.awayGoals)} ${esc(d.away)}</div>
         ${statsBlock}${timelineBlock}</div>`;
     })() : '';
 
@@ -2833,22 +2886,22 @@
         if (!l.player) return `<div class="tma-slot"><div class="tma-pos">${l.slot}</div><b class="tma-empty">— empty —</b></div>`;
         // Position-penalty is still factored into effectiveR5 and drives who gets picked —
         // it's just not surfaced as a separate number here, per request.
-        return `<div class="tma-slot"><div class="tma-pos">${l.slot}</div><b>${l.player.name}</b><span class="tma-mini">R5 ${l.effectiveR5.toFixed(1)}${trainingSparkline(l.player.plot)}</span></div>`;
+        return `<div class="tma-slot"><div class="tma-pos">${l.slot}</div><b>${esc(l.player.name)}</b><span class="tma-mini">R5 ${l.effectiveR5.toFixed(1)}${trainingSparkline(l.player.plot)}</span></div>`;
       }).join('');
       return `<div class="tma-pitch-row">${cells}</div>`;
     }).join('');
 
     const benchHtml = bench.named.map(b => {
       if (!b.player) return `<div class="tma-bench-card"><span class="tma-role-tag">${b.role}</span><span class="tma-mini">no eligible player left</span></div>`;
-      return `<div class="tma-bench-card"><span class="tma-role-tag">${b.role}</span><span>${b.player.name} <span class="tma-badge">${b.player.fp}</span></span><span class="tma-mini">R5 ${(b.player._r5||b.player.rec).toFixed(1)}</span></div>`;
+      return `<div class="tma-bench-card"><span class="tma-role-tag">${b.role}</span><span>${esc(b.player.name)} <span class="tma-badge">${esc(b.player.fp)}</span></span><span class="tma-mini">R5 ${(b.player._r5||b.player.rec).toFixed(1)}</span></div>`;
     }).join('');
-    const benchExtrasHtml = bench.extras.length ? `<div class="tma-mini" style="margin-top:6px;">Also available: ${bench.extras.map(p => p.name + ' (' + p.fp + ')').join(', ')}</div>` : '';
+    const benchExtrasHtml = bench.extras.length ? `<div class="tma-mini" style="margin-top:6px;">Also available: ${bench.extras.map(p => esc(p.name) + ' (' + esc(p.fp) + ')').join(', ')}</div>` : '';
 
     const rolesHtml = `
-      <div class="tma-row"><span>Captain</span><span class="tma-goodval">${roles.captain ? roles.captain.name : '—'}</span></div>
-      <div class="tma-row"><span>Corner taker</span><span class="tma-goodval">${roles.corner ? roles.corner.name : '—'}</span></div>
-      <div class="tma-row"><span>Penalty taker</span><span class="tma-goodval">${roles.penalty ? roles.penalty.name : '—'}</span></div>
-      <div class="tma-row"><span>Free-kick taker</span><span class="tma-goodval">${roles.freeKick ? roles.freeKick.name : '—'}</span></div>
+      <div class="tma-row"><span>Captain</span><span class="tma-goodval">${roles.captain ? esc(roles.captain.name) : '—'}</span></div>
+      <div class="tma-row"><span>Corner taker</span><span class="tma-goodval">${roles.corner ? esc(roles.corner.name) : '—'}</span></div>
+      <div class="tma-row"><span>Penalty taker</span><span class="tma-goodval">${roles.penalty ? esc(roles.penalty.name) : '—'}</span></div>
+      <div class="tma-row"><span>Free-kick taker</span><span class="tma-goodval">${roles.freeKick ? esc(roles.freeKick.name) : '—'}</span></div>
     `;
 
     // Conditional orders in TM are exactly: one Event + one Score state + one Order,
@@ -2917,9 +2970,9 @@
     const condOrdersHtml = condOrders.map((c, i) => `
       <div class="tma-card" style="margin-bottom:8px;">
         <div class="tma-mini" style="text-transform:uppercase;letter-spacing:.04em;color:#8a939c;">Order ${i + 1}</div>
-        <div class="tma-row"><span>Event</span><span>${c.event}</span></div>
-        <div class="tma-row"><span>Score</span><span>${c.score}</span></div>
-        <div class="tma-row"><span>Order</span><span class="tma-goodval">${c.order}</span></div>
+        <div class="tma-row"><span>Event</span><span>${esc(c.event)}</span></div>
+        <div class="tma-row"><span>Score</span><span>${esc(c.score)}</span></div>
+        <div class="tma-row"><span>Order</span><span class="tma-goodval">${esc(c.order)}</span></div>
       </div>`).join('');
 
     // Expected (this fixture) tactics — the primary, proof-backed read from the match page,
@@ -3128,9 +3181,9 @@
 
     const shortlistHtml = (shortlist && shortlist.length) ? shortlist.map(p => `
       <div class="tma-card">
-        <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${p.name} ↗</a>${badge(p)}${natBadge(p)}</h4>
+        <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${esc(p.name)} ↗</a>${badge(p)}${natBadge(p)}</h4>
         <div class="tma-row"><span>Age</span><span class="tma-goodval">${p.age != null ? p.age : '?'}</span></div>
-        <div class="tma-row"><span>Position</span><span>${p.fp || '?'}</span></div>
+        <div class="tma-row"><span>Position</span><span>${esc(p.fp || '?')}</span></div>
         <div class="tma-row"><span>R5</span><span class="tma-goodval">${p.r5 != null ? p.r5.toFixed(1) : '—'}</span></div>
         <div class="tma-row"><span>SI</span><span>${p.asi != null ? p.asi.toLocaleString() : '—'}</span></div>
         <div class="tma-row"><span>Routine</span><span>${p.routine != null ? p.routine.toFixed(1) : '—'}</span></div>
@@ -3146,9 +3199,9 @@
     const weakestRowsHtml = weakestMap ? Object.entries(weakestMap).map(([b, v]) => `<div class="tma-row"><span>${b}</span><span>${v.toFixed(1)}</span></div>`).join('') : '';
     const seniorHtml = (seniorList && seniorList.length) ? seniorList.map(p => `
       <div class="tma-card">
-        <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${p.name} ↗</a>${tierBadge(p)}${natBadge(p)}</h4>
+        <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${esc(p.name)} ↗</a>${tierBadge(p)}${natBadge(p)}</h4>
         <div class="tma-row"><span>Age</span><span>${p.age != null ? p.age : '?'}</span></div>
-        <div class="tma-row"><span>Position</span><span>${p.fp || '?'}</span></div>
+        <div class="tma-row"><span>Position</span><span>${esc(p.fp || '?')}</span></div>
         <div class="tma-row"><span>R5</span><span class="tma-goodval">${p.r5Known ? p.r5.toFixed(1) : '—'}${p.baseline != null ? ` <span class="tma-mini">(weakest ${bucketFor(p.fp)}: ${p.baseline.toFixed(1)})</span>` : ''}</span></div>
         <div class="tma-row"><span>SI</span><span>${p.asi != null ? p.asi.toLocaleString() : '—'}</span></div>
         <div class="tma-row"><span>Routine</span><span>${p.routine != null ? p.routine.toFixed(1) : '—'}</span></div>
@@ -3174,7 +3227,7 @@
       return ranked.slice(0, 20).map(p => {
         const gem = p.growthMultiple != null && p.growthMultiple >= YOUTH_CRITERIA.highPotentialGrowth;
         return `<div class="tma-card">
-          <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${p.name} ↗</a> ${gem ? '<span class="tma-badge" style="background:#2a2f42;color:#b9c4ee;">high potential</span>' : ''}</h4>
+          <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${esc(p.name)} ↗</a> ${gem ? '<span class="tma-badge" style="background:#2a2f42;color:#b9c4ee;">high potential</span>' : ''}</h4>
           <div class="tma-row"><span>Current Rec</span><span>${(p.rec || 0).toFixed(1)}</span></div>
           <div class="tma-row"><span>Potential</span><span class="tma-goodval">${(p.potential / 2).toFixed(1)} / 5</span></div>
         </div>`;
