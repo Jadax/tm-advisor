@@ -30,9 +30,11 @@ TM Advisor answers all of these — automatically, on every page — using only 
 
 - **Best XI picker** — evaluates formations (4-4-2, 4-5-1, 3-5-2, 4-3-3) using position-aware R5 scores. Penalises players played out of position so you see who *actually* fits where.
 - **Mentality & style** — compares your squad strength vs your opponent's as a percentage, then recommends mentality, attacking style, and focus side with reasoning you can verify.
+- **Formation counters** — when the opponent's formation is known, flags if the community meta suggests a formation that tends to counter it (clearly marked as a nudge on top of the R5 pick, never a hard override).
+- **Fixture difficulty** — rates each upcoming match Comfortable / Even / Tough from the opponent's best-XI R5, so you know which weeks deserve real prep.
 - **Captain & set pieces** — picks captain (highest ASI), corner/free-kick/penalty takers based on the specific skills each role needs.
 - **Conditional orders** — generates 5 position-aware substitution orders with exact timing and what to assign on the TM sub screen.
-- **Opponent scouting** — reads the next match's expected formation and tactics from the game's own data.
+- **Opponent scouting** — reads the next match's expected formation and tactics from the game's own data. Also compiles the opponent's usual formation/mentality/style from their last 5 matches.
 
 ### 📊 Inline Data Columns
 
@@ -49,8 +51,18 @@ Adds **Routine**, **Skill Index**, and **R5** columns directly to the game's own
 
 - **Youth Finder** — scans players you've seen on the transfer list and ranks them by a composite score (R5, SI, routine, age upside). Shows Elite / Strong tiers with sell prices and budget guidance.
 - **Senior Targets** — same pool, but filters for players who'd be a genuine upgrade over your weakest starter in their position.
+- **Market-value verdict** — for every shortlisted player, compares the live bid against the game's Sell-to-Agent / Max Sell Price to flag it **Underpriced / Fair / Overpriced** at a glance.
+- **Bloom-phase estimate** — grades each scout report's youth by bloom phase (from age + potential headroom) so you know who to train hard before it ends.
 - **Spending Guidance** — calculates a recommended transfer budget based on your cash, wage bill, and a 12-week reserve buffer.
 - **Valuation** — shows exact Sell-to-Agent and Max Sell Price for any player with known skills.
+
+### 🏆 League Squad Strength
+
+A dedicated **League tab** ranks every club in your division by the average R5 of its best 11 (not points), highlighting where you sit and which remaining fixtures are toughest.
+
+### 🎯 Training Recommendations
+
+On the Tactics tab, flags each squad player's weak **primary skills** for their natural position to train next, calls out players whose R5 has **plateaued**, and reminds you which youths are still in their **development-bonus window** (train them hard).
 
 ### 🏟 Stadium Upgrade Advisor
 
@@ -65,6 +77,7 @@ Ranks every upgradeable facility by ROI — payback period, income gain, mainten
 ### 📈 Development Tracking
 
 Dated squad snapshots track each player's SI, Routine, and R5 over time — so you can see who's improving, who's plateauing, and who's declining.
+
 
 ---
 
@@ -104,9 +117,10 @@ The floating panel shows **one tab at a time** — whichever matches the page yo
 | Page | Tab |
 |------|-----|
 | Home | Dashboard |
-| Tactics / Players | Tactics |
+| Tactics / Players | Tactics (incl. training priorities) |
 | Transfer / Scouts / Youth Dev | Scouting |
 | Stadium / Finances | Stadium |
+| League | League squad strength |
 | Match pages | Dashboard (with match stats) |
 
 The dock hides itself on `/players/` and `/club/` pages where the inline columns do the work instead.

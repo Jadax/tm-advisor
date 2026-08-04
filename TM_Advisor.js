@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.5.1
+// @version      3.6.4
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -52,6 +52,8 @@
  *   SECTION 5B YOUTH FINDER          (transfer-list-only talent shortlist)
  *   SECTION 5C SENIOR TARGETS        (transfer-list-only, position-need)
  *   SECTION 5D SPENDING GUIDANCE     (cash/wage-aware transfer budget)
+ *   SECTION 5E TRAINING RECOMMENDATIONS (weak-primary + plateau + bloom advice)
+ *   SECTION 5F LEAGUE STRENGTH       (rank clubs by best-XI R5)
  *   SECTION 6  STADIUM ENGINE        (upgrade ROI ranking)
  *   SECTION 7  UI                    (styles, panel; ONE context-relevant
  *                                       tab per page, no League tab)
@@ -882,6 +884,24 @@
     }).filter(p => p.id);
   }
 
+  // ---- Bloom-phase estimate (heuristic, clearly labelled) ----
+  // TM's own guide: a player can start blooming any time from age 16-24 and the bloom itself
+  // lasts ~3 seasons (36 real weeks), always starting on the birthday; ANY player aged 16 to
+  // 18 years 11 months also gets a global development bonus that doubles the training drop.
+  // We can't read the report's bloom wording from this endpoint reliably, so we infer a rough
+  // phase from age + how far potential is above current rec (growthMultiple). This is an
+  // estimate to help you decide training intensity — NOT a confirmed game value.
+  function bloomEstimate(age, growthMultiple) {
+    if (age != null) {
+      if (Number(age) < 16) return { phase: 'Pre-bloom', flag: 'dev-bonus', cls: '#b9c4ee', note: 'too young to bloom yet — build skills before it starts (any birthday, 16–24).' };
+      if (Number(age) < 19) return { phase: 'Development bonus', flag: 'dev-bonus', cls: '#ffd75e', note: '16–18: global bonus doubles training drop — train hard now.' };
+    }
+    if (growthMultiple != null && growthMultiple >= 1.4) return { phase: 'Likely in bloom', flag: 'bloom', cls: '#9ece6a', note: 'potential well above current rating — bloom appears active; keep TI high.' };
+    if (growthMultiple != null && growthMultiple >= 1.15) return { phase: 'Possible end-of-bloom', flag: 'bloom', cls: '#8a939c', note: 'some growth headroom left — wind down intensity soon.' };
+    if (age == null) return null;
+    return { phase: 'Bloom likely ended', flag: 'done', cls: '#8a939c', note: 'little headroom left — focus on other youths.' };
+  }
+
   // ---- Opponent match-history scouting (formation, likely XI, tactic tendencies) ----
   // Reads an opponent's recent matches to see
   // what they actually play, not just who's in their squad. Two data sources make this
@@ -1101,6 +1121,71 @@
         }
       }
     } catch (e) { console.error('TM Advisor opponent refresh failed', e); onProgress && onProgress('opponent', 'error'); }
+  }
+
+  /* ============================================================
+   *  SECTION 5F — LEAGUE STRENGTH RANKING
+   *  ------------------------------------------------------------
+   *  Ranks every club in your league by the average R5 of its best
+   *  XI (reusing the exact same R5 engine as everything else), so you
+   *  can see where you actually sit on squad quality — not points —
+   *  and which fixtures ahead are the tough ones. Data comes from the
+   *  league table page (club ids + positions) and each club's real
+   *  skills via the same AJAX endpoint the opponent scouting uses.
+   *  On-demand + short per-club cache, so re-runs are cheap.
+   * ============================================================ */
+  function parseLeagueTable(doc) {
+    // The league table is rendered by the game as a table of rows; we only need each club's
+    // id, name and current table position. Selectors are best-effort across TM's markup.
+    const rows = [...doc.querySelectorAll('a[href*="/club/"]')]
+      .map(a => { const m = (a.getAttribute('href') || '').match(/\/club\/(\d+)/); const row = a.closest('tr'); return row ? { id: m && m[1], name: a.textContent.trim() } : null; })
+      .filter(r => r && r.id)
+      .filter((r, i, arr) => arr.findIndex(x => x.id === r.id) === i); // dedupe
+    return rows.length ? rows : null;
+  }
+
+  const LEAGUE_CACHE_HOURS = 24;
+  // Fetches the average best-XI R5 for a club, cached to avoid re-hitting the server on every
+  // league refresh. Returns { avg, counted, squadSize } or an error marker.
+  async function leagueClubStrength(clubId_, cache) {
+    const cid = String(clubId_).replace(/\D/g, '');
+    if (!cid) return { avg: null };
+    if (cache[cid] && (now() - cache[cid].t) < LEAGUE_CACHE_HOURS * 3600e3) return cache[cid];
+    try {
+      const players = await fetchOpponentSquadReal(cid);
+      const vals = players.map(p => p._r5).filter(v => typeof v === 'number' && !isNaN(v)).sort((a, b) => b - a);
+      const bestXI = Math.min(11, vals.length);
+      const entry = bestXI ? { t: now(), avg: +(vals.slice(0, bestXI).reduce((a, b) => a + b, 0) / bestXI).toFixed(1), counted: bestXI, squadSize: players.length } : { t: now(), avg: null, counted: 0, squadSize: 0 };
+      cache[cid] = entry; return entry;
+    } catch (e) {
+      cache[cid] = { t: now(), avg: null, counted: 0, squadSize: 0, error: true };
+      return cache[cid];
+    }
+  }
+
+  async function buildLeagueRanking() {
+    const homeData = getSlice('home');
+    let leaguePath = homeData && homeData.data && homeData.data.nextMatch && homeData.data.nextMatch.leaguePath;
+    if (!leaguePath) {
+      // Fall back: the /league/ page URL pattern from club context.
+      leaguePath = (document.querySelector('a[league_link]') && document.querySelector('a[league_link]').getAttribute('href')) || null;
+    }
+    if (!leaguePath) return { error: 'League not identified yet — visit your Home page (next-match block shows the league link).' };
+    const doc = await fetchDoc(leaguePath);
+    const table = parseLeagueTable(doc);
+    if (!table || !table.length) return { error: 'Could not parse the league table on ' + leaguePath };
+    const c = loadCache();
+    const cache = (c.leagueStrength && c.leagueStrength.data) || {};
+    const names = (c.leagueStrength && c.leagueStrength.names) || {};
+    const results = [];
+    for (const row of table) {
+      const cid = String(row.id).replace(/\D/g, '');
+      if (row.name) names[cid] = row.name;
+      results.push({ id: row.id, name: row.name, ...(await leagueClubStrength(row.id, cache)) });
+    }
+    c.leagueStrength = { t: now(), data: cache, names };
+    saveCache(c);
+    return { leaguePath, results, myId: clubId, builtAt: now() };
   }
 
   /* ============================================================
@@ -1711,6 +1796,43 @@
   };
   const FORMATIONS = Object.fromEntries(Object.entries(FORMATION_ROWS).map(([k, rows]) => [k, rows.flat()]));
 
+  // ---- Formation counters (community-sourced meta) ----
+  // A qualitative "which formation tends to beat which" map, distilled from TM community
+  // discussion (crowding a weak flank, overloading a 3-CB back line, matching a 1-striker
+  // with a spare CDM, etc.). This is meta-knowledge, NOT a game formula — treat it as a
+  // nudge on top of the R5-based pick, not a hard override. Used to surface a
+  // "counter suggestion" when we know the opponent's formation.
+  const FORMATION_COUNTERS = {
+    '4-4-2': ['3-5-2'],   // two strikers press a 3-CB line; wide Mids handle the 3-5-2 wings
+    '4-5-1': ['4-3-3'],   // spare DM/mid trio + lone striker can sit on 4-3-3's three forwards
+    '3-5-2': ['4-4-2'],   // numbers in central/flank midfield vs the 3-5-2 wings; two F vs three D
+    '4-3-3': ['3-5-2'],   // wide triangles push the 3-5-2 flanks
+  };
+  // Difficulty tiers for a fixture, based on the opponent's best-XI R5 vs ours. This reframes
+  // the same percentage edge the mentality pick already uses into an at-a-glance "tough week?"
+  function fixtureDifficulty(myAvg, oppAvg) {
+    if (myAvg == null || oppAvg == null || oppAvg <= 0) return null;
+    const diffPct = (myAvg - oppAvg) / oppAvg * 100;
+    if (diffPct >= 12) return { label: 'Comfortable', cls: 'goodval', note: `we're clearly stronger (+${diffPct.toFixed(0)}% squad edge)` };
+    if (diffPct <= -12) return { label: 'Tough', cls: 'badval', note: `they're clearly stronger (${diffPct.toFixed(0)}% deficit)` };
+    if (diffPct >= 4) return { label: 'Slightly favoured', cls: 'goodval', note: `small edge (+${diffPct.toFixed(0)}%)` };
+    if (diffPct <= -4) return { label: 'Slightly harder', cls: 'warn', note: `small deficit (${diffPct.toFixed(0)}%)` };
+    return { label: 'Even', cls: 'mini', note: `about level (${diffPct.toFixed(0)}%)` };
+  }
+  // Suggests a roughly-formation-counter when the opponent's formation is known, and returns
+  // the fixture difficulty — both surfaced in the Tactics view.
+  function formationCounterAndDifficulty(myFormation, oppFormation, myAvg, oppAvg) {
+    let counter = null;
+    if (oppFormation && FORMATION_COUNTERS[oppFormation]) {
+      counter = {
+        for: oppFormation,
+        suggested: FORMATION_COUNTERS[oppFormation][0],
+        note: `community meta: ${FORMATION_COUNTERS[oppFormation][0]} tends to counter ${oppFormation} — but your highest-R5 XI (${myFormation}) is usually the safer pick unless the R5 gap is close.`,
+      };
+    }
+    return { counter, difficulty: fixtureDifficulty(myAvg, oppAvg) };
+  }
+
   // ---- Position-penalty system ----
   // Real off-position penalties matter: a central midfielder shoved out to M-R shouldn't
   // just silently count at full strength (or worse, be excluded from side-strength maths
@@ -1972,7 +2094,13 @@
       }
     }
 
-    return { mentality, style, focus, reasoning };
+    const fcDiff = formationCounterAndDifficulty(
+      myXI.formation,
+      expected && expected.formation ? expected.formation : (scouting && scouting.recentFormation ? scouting.recentFormation : null),
+      myAvg,
+      oppAvg
+    );
+    return { mentality, style, focus, reasoning, counter: fcDiff.counter, difficulty: fcDiff.difficulty };
   }
 
   // Tiny inline sparkline for a player's training-intensity trend (last 6 months),
@@ -2033,6 +2161,21 @@
     const ageMonths = ageMonthsOf(p);
     if (!ageMonths) return null;
     return calcSellToAgentPrice(asi, ageMonths, bucketFor(p.fp) === 'GK');
+  }
+
+  // Is a listed player actually a good buy? Compares the live transfer-list bid against the
+  // game's own two confirmed price points (Sell-to-Agent = instant guaranteed floor, Max Sell
+  // Price = ceiling you could list him for — SECTION 2C). A bid near/below the Sell-to-Agent
+  // floor is a genuine bargain (you could almost instantly resell at that price); a bid at or
+  // past Max Price means you'd struggle to ever turn a profit. Age/position/quality still
+  // matter (see scoutScore), so this verdict is a price-only sanity check, not the final word.
+  function marketVerdict(price, estValue, maxValue) {
+    if (price == null || price <= 0) return null;
+    const ev = estValue || 0, mv = maxValue || 0;
+    if (ev > 0 && price < ev * 0.85) return { label: 'Underpriced', cls: 'goodval', note: 'bid is below his guaranteed Sell-to-Agent price' };
+    if (mv > 0 && price > mv * 1.08) return { label: 'Overpriced', cls: 'badval', note: 'bid exceeds his Max Sell Price — hard to profit' };
+    if (ev > 0 && mv > 0) return { label: 'Fair', cls: 'mini', note: 'bid sits within his Sell-to-Agent / Max price range' };
+    return null;
   }
 
   // A single composite score used to rank AND tier every shortlist candidate (youth and
@@ -2429,6 +2572,63 @@
   }
 
   /* ============================================================
+   *  SECTION 5E — TRAINING RECOMMENDATIONS
+   *  ------------------------------------------------------------
+   *  Turns the raw squad skill data into actionable training advice:
+   *  for each player's natural position we know which skills matter
+   *  most (from the same per-position R5 weight rows the rating is
+   *  built on — SECTION 2B), so we can flag weak "primary" skills to
+   *  train next, call out players whose R5 has stopped improving
+   *  (plateaued), and remind you that youths in the development bonus
+   *  window (under ~18, per TM's own guide) train fastest so they
+   *  deserve the high training intensity. Clearly heuristic, but every
+   *  signal traces to a game-confirmed source.
+   * ============================================================ */
+  // Primary skills per position bucket, drawn from the highest-weighted skills in each
+  // corresponding R5 row. "Primary" = skills that contribute the most to that position's
+  // rating, so a weak primary skill is the single highest-ROI thing to train.
+  const TRAIN_PRIMARY = {
+    GK: ['han', 'one', 'ref', 'ari', 'com', 'kic', 'thr', 'jum', 'sta', 'pac'],
+    D: ['mar', 'tac', 'pos', 'hea', 'sta', 'str'],
+    DM: ['mar', 'tac', 'pas', 'wor', 'pos', 'sta', 'pac'],
+    M: ['pas', 'tec', 'pos', 'wor', 'fin', 'sta', 'pac'],
+    OM: ['pas', 'tec', 'fin', 'cro', 'pos', 'pac', 'lon'],
+    F: ['fin', 'tec', 'pos', 'hea', 'pac', 'lon', 'wor'],
+  };
+  const TRAIN_STRONG = 14; // a primary skill at/above this is considered solid
+  const TRAIN_WEAK = 11;   // a primary skill at/below this is a real weak spot to fix
+  const TRAIN_DEVELOP_AGE = 18; // under this age = still in the youth development bonus per TM guide
+
+  // Per-player training advice. Returns a sorted list with a short human readout each.
+  function generateTrainingRecommendations(players) {
+    if (!players || !players.length) return [];
+    const recs = [];
+    players.forEach(p => {
+      if (!p.skills || p._r5 == null) return;
+      const bucket = bucketFor(p.fp);
+      const primaries = TRAIN_PRIMARY[bucket] || TRAIN_PRIMARY.M;
+      const weak = primaries.filter(k => (Number(p.skills[k]) || 0) <= TRAIN_WEAK);
+      const isYouth = p.age != null && Number(p.age) < TRAIN_DEVELOP_AGE;
+      // Plateau check: compare current R5 against an earlier snapshot (roughly a month back).
+      const trend = playerTrend(p.id, 30);
+      const plateaued = trend && trend.r5 != null && trend.r5 <= 0.1;
+      const focus = weak.length ? weak
+        .sort((a, b) => (Number(p.skills[a]) || 0) - (Number(p.skills[b]) || 0))
+        .map(k => k.toUpperCase()).slice(0, 3).join(' / ') : null;
+      recs.push({
+        id: p.id, name: p.name, bucket, fp: p.fp, age: p.age,
+        r5: p._r5, weak, isYouth, plateaued, focus,
+        priority: isYouth || focus ? 'high' : (plateaued ? 'medium' : 'low'),
+        // A short human reason — the WHY, since users trust advice they understand.
+        note: (focus ? `Weak primary: train ${focus}.` : '') +
+              (isYouth ? ' In development bonus — high training intensity.' : '') +
+              (plateaued ? ' R5 has plateaued — check TI/coaches.' : ''),
+      });
+    });
+    return recs.sort((a, b) => (b.priority === 'high') - (a.priority === 'high') || (b.priority === 'medium') - (a.priority === 'medium') || (Number(b.r5) || 0) - (Number(a.r5) || 0));
+  }
+
+  /* ============================================================
    *  SECTION 6 — STADIUM ENGINE
    * ============================================================ */
 
@@ -2725,7 +2925,7 @@
 
   // Human-readable label per advisor tab, used to render the single relevant tab for
   // whatever page you're on — see contextTabForPath() below.
-  const TAB_LABELS = { dash: 'Dashboard', tactics: 'Tactics', stadium: 'Stadium', scouting: 'Scouting' };
+  const TAB_LABELS = { dash: 'Dashboard', tactics: 'Tactics', stadium: 'Stadium', scouting: 'Scouting', league: 'League' };
 
   // Sets the active tab, renders it, and rebuilds the tab bar to show ONLY that one tab —
   // the advisor now surfaces exactly the section relevant to the page you're on (Tactics on
@@ -2770,6 +2970,7 @@
     if (p.startsWith('/stadium')) return 'stadium';
     if (p.startsWith('/finances')) return 'stadium';         // finances feed the stadium ROI view
     if (p.startsWith('/transfer') || p.startsWith('/shortlist') || p.startsWith('/scouts')) return 'scouting';
+    if (p.startsWith('/league')) return 'league';
     // An individual player's profile page (e.g. /players/142683102/...) isn't your squad —
     // the Rou/SI/R5/breakdown card is already injected directly onto that page (Section 4),
     // so the side panel has nothing specific to show; fall through to the Dashboard default
@@ -2785,6 +2986,7 @@
     else if (tab === 'tactics') renderTactics();
     else if (tab === 'stadium') renderStadiumTab();
     else if (tab === 'scouting') renderScouting();
+    else if (tab === 'league') renderLeague();
   }
 
   function renderDashboard() {
@@ -2991,6 +3193,20 @@
         </div>`;
     })() : '';
 
+    // Training recommendations (SECTION 5E): weak primary skills to train, plateau flags,
+    // and priority youths in their development-bonus window. Shown even without an opponent.
+    const trainingRecs = generateTrainingRecommendations(players);
+    const trainingHtml = trainingRecs.length ? `
+      <div class="tma-card">
+        <h4>Training Priorities <span class="tma-mini">(${trainingRecs.length} players)</span></h4>
+        <div class="tma-mini" style="margin-bottom:8px;">Weak "primary" skills for each player's natural position, plus who's plateaued. Youths under ${TRAIN_DEVELOP_AGE} train fastest — keep their intensity high.</div>
+        ${trainingRecs.slice(0, 12).map(r => `
+          <div class="tma-row">
+            <span>${esc(r.name)} <span class="tma-badge">${esc(r.bucket)}</span>${r.isYouth ? ' <span class="tma-badge" style="background:#2a2f42;color:#b9c4ee;">youth</span>' : ''}</span>
+            <span class="tma-mini">${r.focus ? `<span style="color:#e8cfa0;">${r.focus}</span> · ` : ''}${r.plateaued ? '<span style="color:#e05555;">plateaued</span>' : ''}${r.note ? ' <span class="tma-mini">' + esc(r.note) + '</span>' : ''}</span>
+          </div>`).join('')}
+      </div>` : '';
+
     body.innerHTML = `
       <div class="tma-card">
         <h4>Recommended Formation: ${best.formation} <span class="tma-badge">Avg R5 ${(best.totalRec / startingPlayers.length).toFixed(1)}</span></h4>
@@ -2998,9 +3214,11 @@
       </div>
       <div class="tma-card">
         <h4>Suggested Tactic Settings</h4>
+        ${settings.difficulty ? `<div class="tma-row"><span>Fixture difficulty</span><span style="color:${settings.difficulty.cls === 'badval' ? '#e05555' : (settings.difficulty.cls === 'warn' ? '#ff9800' : (settings.difficulty.cls === 'goodval' ? '#9ece6a' : '#8a939c'))};font-weight:700;">${settings.difficulty.label}</span></div>` : ''}
         <div class="tma-row"><span>Mentality</span><span class="tma-goodval">${MENTALITY[settings.mentality]}</span></div>
         <div class="tma-row"><span>Attacking Style</span><span class="tma-goodval">${ATT_STYLE[settings.style]}</span></div>
         <div class="tma-row"><span>Focus Side</span><span class="tma-goodval">${FOCUS_SIDE[settings.focus]}</span></div>
+        ${settings.counter ? `<div class="tma-mini" style="margin-top:6px;">⚔ ${esc(settings.counter.note)}</div>` : ''}
       </div>
       <div class="tma-card">
         <h4>Captain &amp; Set-Piece Takers</h4>
@@ -3017,6 +3235,7 @@
         ${condOrdersHtml}
       </div>
       ${expectedTacticsHtml}
+      ${trainingHtml}
     `;
   }
 
@@ -3104,6 +3323,51 @@
     `;
   }
 
+  function renderLeague() {
+    const body = document.getElementById('tma-body');
+    const c = loadCache();
+    const slice = c.leagueStrength;
+    const saved = slice && slice.data;
+    const names = (slice && slice.names) || {};
+    // Sort by best-XI R5 descending, with unranked (no data) teams sinking to the bottom.
+    const entries = saved ? Object.entries(saved).map(([id, e]) => ({ id, ...e }))
+      .sort((a, b) => (b.avg == null ? -1 : b.avg) - (a.avg == null ? -1 : a.avg)) : [];
+    const myRank = clubId && entries.findIndex(e => e.id === clubId) >= 0 ? entries.findIndex(e => e.id === clubId) + 1 : null;
+    const myEntry = clubId ? entries.find(e => e.id === clubId) : null;
+    const myAvg = myEntry && myEntry.avg != null ? myEntry.avg : null;
+    const rowHtml = (e) => {
+      const isMe = String(e.id) === String(clubId);
+      const diff = (myAvg != null && e.avg != null && !isMe) ? (e.avg - myAvg).toFixed(1) : null;
+      return `<div class="tma-row" style="${isMe ? 'background:#1d242e;' : ''}">
+        <span>${isMe ? '<span class="tma-badge">you</span> ' : ''}${esc(names[String(e.id)] || 'Club ' + e.id)}</span>
+        <span class="tma-mini">${e.avg != null ? `<span class="tma-goodval">${e.avg}</span>${diff != null ? ` <span class="tma-mini">(${diff > 0 ? '+' : ''}${diff})</span>` : ''}` : 'no data'}</span>
+      </div>`;
+    };
+    body.innerHTML = `
+      <div class="tma-card">
+        <h4>League Squad Strength <span class="tma-badge">best-XI R5 avg</span></h4>
+        <div class="tma-mini" style="margin-bottom:8px;">Ranks every club in your league by the average R5 of its best 11, so you can see where you sit on squad quality (not points) and which remaining fixtures are toughest.</div>
+        ${saved && entries.length ? entries.filter(e => e.avg != null).map(rowHtml).join('') : '<div class="tma-mini">Not built yet — tap Build below.</div>'}
+        <button class="tma-btn" id="tma-league-build">🏆 Build League Strength</button>
+        <div class="tma-mini" id="tma-league-status">${myRank ? 'You rank #' + myRank + ' by squad strength.' : 'Not ranked yet'}</div>
+      </div>
+    `;
+    const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+    bind('tma-league-build', async () => {
+      const status = document.getElementById('tma-league-status');
+      status.textContent = 'Building… (fetching each club\'s squad — may take a moment)';
+      try {
+        const rank = await buildLeagueRanking();
+        if (rank.error) { status.textContent = rank.error; return; }
+        status.textContent = 'Built from ' + rank.leaguePath + ' (' + rank.results.filter(r => r.avg != null).length + '/' + rank.results.length + ' clubs rated).';
+      } catch (e) {
+        status.textContent = 'Build failed — see console.';
+        console.error('TM Advisor: league build failed', e);
+      }
+      renderLeague();
+    });
+  }
+
   function renderScouting() {
     const body = document.getElementById('tma-body');
     const c = loadCache();
@@ -3176,6 +3440,12 @@
       let out = p.price ? `<div class="tma-row"><span>Current bid</span><span class="tma-goodval">${money(p.price)}</span></div>` : '';
       if (p.estValue) out += `<div class="tma-row"><span>Sell-to-Agent</span><span>${money(p.estValue)}</span></div>`;
       if (p.maxValue && p.maxValue !== p.estValue) out += `<div class="tma-row"><span>Max Sell Price</span><span>${money(p.maxValue)}</span></div>`;
+      // Market-value verdict (Section 5B): is the live bid a bargain, fair, or overpriced?
+      const verdict = marketVerdict(p.price, p.estValue, p.maxValue);
+      if (verdict) {
+        const vColor = verdict.cls === 'goodval' ? '#9ece6a' : (verdict.cls === 'badval' ? '#e05555' : '#8a939c');
+        out += `<div class="tma-row"><span>Verdict</span><span style="color:${vColor};font-weight:700;">${verdict.label} <span class="tma-mini" style="font-weight:400;">— ${verdict.note}</span></span></div>`;
+      }
       return out;
     };
 
@@ -3226,10 +3496,12 @@
       const ranked = [...scoutData].sort((a, b) => (b.potential || 0) - (a.potential || 0));
       return ranked.slice(0, 20).map(p => {
         const gem = p.growthMultiple != null && p.growthMultiple >= YOUTH_CRITERIA.highPotentialGrowth;
+        const bloom = bloomEstimate(p.age, p.growthMultiple);
         return `<div class="tma-card">
-          <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${esc(p.name)} ↗</a> ${gem ? '<span class="tma-badge" style="background:#2a2f42;color:#b9c4ee;">high potential</span>' : ''}</h4>
+          <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${esc(p.name)} ↗</a> ${gem ? '<span class="tma-badge" style="background:#2a2f42;color:#b9c4ee;">high potential</span>' : ''}${bloom ? ` <span class="tma-badge" style="background:#2a2f42;color:${bloom.cls};">${bloom.phase}</span>` : ''}</h4>
           <div class="tma-row"><span>Current Rec</span><span>${(p.rec || 0).toFixed(1)}</span></div>
           <div class="tma-row"><span>Potential</span><span class="tma-goodval">${(p.potential / 2).toFixed(1)} / 5</span></div>
+          ${bloom ? `<div class="tma-mini" style="color:${bloom.cls};">${esc(bloom.note)}</div>` : ''}
         </div>`;
       }).join('');
     })() : '<div class="tma-mini">No scout reports cached yet.</div>';
