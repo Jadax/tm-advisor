@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.6.4
+// @version      3.6.5
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -16,19 +16,12 @@
 // ==/UserScript==
 
 /* ================================================================
- *  TM ADVISOR  —  © Tushant Sharma. Released under the MIT licence.
+ *  TM ADVISOR — © Tushant Sharma. Released under the MIT licence.
  *
  *  Not affiliated with, endorsed by, or connected to Trophy Games A/S.
  *  "TrophyManager" is a trademark of its respective owner. This is an
  *  unofficial, fan-made helper that only reads pages you already have
  *  access to and stores everything locally in your own browser.
- *
- *  DISTRIBUTION NOTE (Chrome Web Store / Greasy Fork):
- *   - This is authored as a Tampermonkey userscript. To ship it as a
- *     standalone Chrome extension, wrap this file as a content script
- *     in a manifest v3 package (matches: https://trophymanager.com/*).
- *   - Keep @version in sync with the store listing version.
- * ================================================================
  *
  *  TABLE OF CONTENTS  (search for the exact heading to jump there)
  *  ----------------------------------------------------------------
@@ -56,10 +49,8 @@
  *   SECTION 5F LEAGUE STRENGTH       (rank clubs by best-XI R5)
  *   SECTION 6  STADIUM ENGINE        (upgrade ROI ranking)
  *   SECTION 7  UI                    (styles, panel; ONE context-relevant
- *                                       tab per page, no League tab)
+ *                                       tab per page)
  *   SECTION 8  BOOT
- *  If something looks off, tell me the section number/name and I'll
- *  only need to touch that block.
  * ================================================================ */
 
 (function () {
@@ -2837,6 +2828,37 @@
     if (h < 24) return h + 'h ago';
     return Math.floor(h / 24) + 'd ago';
   }
+  // ---- Shared UI helpers (avoid redefining these in every render function) ----
+  const fmtMoney = (n) => n == null ? '—' : Number(n).toLocaleString();     // currency-ish
+  const bindBtn = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+  const playerLink = (p) => `https://trophymanager.com/players/${p.id}/`;
+  // Tier/potential badges shared by the scouting cards.
+  const tierBadge = (p) => p.tier === 'elite'
+    ? ' <span class="tma-badge" style="background:#3d3524;color:#e8cfa0;">elite</span>'
+    : (p.tier === 'strong' ? ' <span class="tma-badge" style="background:#28323d;color:#a8c8e0;">strong</span>' : '');
+  const badge = (p) => {
+    let out = tierBadge(p);
+    if (p.highPotential) out += ' <span class="tma-badge" style="background:#2a2f42;color:#b9c4ee;">high potential</span>';
+    return out;
+  };
+  const natBadge = (p) => {
+    if (!p.nat) return '';
+    const home = MY_COUNTRY && p.nat === MY_COUNTRY;
+    return ` <span class="tma-badge" style="background:${home ? '#1c2c3d' : '#2c313780'};color:${home ? '#9fc3e0' : '#c7cdd3'};">${p.nat.toUpperCase()}${home ? ' · home' : ''}</span>`;
+  };
+  // Cost block shared by youth + senior cards: live bid, the game's two confirmed price
+  // points, and the market-verdict (Section 5B) on whether the bid looks like good value.
+  const costRow = (p) => {
+    let out = p.price ? `<div class="tma-row"><span>Current bid</span><span class="tma-goodval">${fmtMoney(p.price)}</span></div>` : '';
+    if (p.estValue) out += `<div class="tma-row"><span>Sell-to-Agent</span><span>${fmtMoney(p.estValue)}</span></div>`;
+    if (p.maxValue && p.maxValue !== p.estValue) out += `<div class="tma-row"><span>Max Sell Price</span><span>${fmtMoney(p.maxValue)}</span></div>`;
+    const verdict = marketVerdict(p.price, p.estValue, p.maxValue);
+    if (verdict) {
+      const vColor = verdict.cls === 'goodval' ? '#9ece6a' : (verdict.cls === 'badval' ? '#e05555' : '#8a939c');
+      out += `<div class="tma-row"><span>Verdict</span><span style="color:${vColor};font-weight:700;">${verdict.label} <span class="tma-mini" style="font-weight:400;">— ${verdict.note}</span></span></div>`;
+    }
+    return out;
+  };
 
   // Drag-to-move: the panel defaults to bottom-right, which can sit over game controls on
   // narrower layouts. Dragging by the header switches it to an absolute left/top position
@@ -3295,12 +3317,12 @@
 
     const rowsHtml = results.slice(0, 12).map(r => {
       const afford = r.affordable ? '<span class="tma-badge">affordable</span>' : '<span class="tma-badge" style="background:#4a1d1d;color:#f8b4b4">too costly</span>';
-      const tierBadge = `<span class="tma-badge" style="${TIER_COLOR[r.tier]}">${TIER_LABEL[r.tier]}</span>`;
+      const stadiumTierBadge = `<span class="tma-badge" style="${TIER_COLOR[r.tier]}">${TIER_LABEL[r.tier]}</span>`;
       const payback = r.paybackWeeks ? r.paybackWeeks.toFixed(0) + ' wks payback' : (r.weeklyGain != null ? 'no clear ROI' : '');
       const warnHtml = r.sustainabilityWarning ? `<div class="tma-reason" style="color:#f8dca8;">⚠ ${r.sustainabilityWarning}</div>` : '';
       return `<div class="tma-card">
         <h4>${r.title} → Lvl ${r.nextLevel}</h4>
-        <div style="margin:-4px 0 6px;">${tierBadge} ${afford}</div>
+        <div style="margin:-4px 0 6px;">${stadiumTierBadge} ${afford}</div>
         <div class="tma-row"><span>Cost</span><span>${r.cost.toLocaleString()}</span></div>
         <div class="tma-row"><span>Maintenance Δ/wk</span><span>${r.maintDelta ? '+' + r.maintDelta.toLocaleString() : '0'}</span></div>
         ${r.weeklyGain != null ? `<div class="tma-row"><span>Est. income Δ/wk</span><span class="tma-goodval">${r.weeklyGain.toFixed(0)}</span></div>` : ''}
@@ -3352,7 +3374,7 @@
         <div class="tma-mini" id="tma-league-status">${myRank ? 'You rank #' + myRank + ' by squad strength.' : 'Not ranked yet'}</div>
       </div>
     `;
-    const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+    const bind = bindBtn;
     bind('tma-league-build', async () => {
       const status = document.getElementById('tma-league-status');
       status.textContent = 'Building… (fetching each club\'s squad — may take a moment)';
@@ -3380,8 +3402,6 @@
     const poolNow = collectYouthPool();
     const youthPrefs = loadShortlistPrefs('youth');
     const seniorPrefs = loadShortlistPrefs('senior');
-
-    const money = (n) => n == null ? '—' : Number(n).toLocaleString();
     // Max-cost input + foreign toggle, shared markup for both shortlists. Max cost is a live
     // input (not a constant) since it changes as your cash on hand changes; a blank field
     // doesn't mean "no limit" — it means "use my current affordable budget" (effectiveMaxCost,
@@ -3398,7 +3418,7 @@
         : '';
       return `
       ${ageRow}
-      <div class="tma-row"><span>Max cost</span><input type="number" id="tma-${which}-maxcost" placeholder="${auto ? money(auto) : 'no limit'}" min="0" step="100000" value="${prefs.maxCost != null ? prefs.maxCost : ''}" style="width:130px;background:#161a1f;border:1px solid #2b323b80;color:#e6e9ec;border-radius:5px;padding:4px 7px;text-align:right;"></div>
+      <div class="tma-row"><span>Max cost</span><input type="number" id="tma-${which}-maxcost" placeholder="${auto ? fmtMoney(auto) : 'no limit'}" min="0" step="100000" value="${prefs.maxCost != null ? prefs.maxCost : ''}" style="width:130px;background:#161a1f;border:1px solid #2b323b80;color:#e6e9ec;border-radius:5px;padding:4px 7px;text-align:right;"></div>
       <label class="tma-row" style="cursor:pointer;"><span>Include foreign players</span><input type="checkbox" id="tma-${which}-foreign" ${prefs.includeForeign ? 'checked' : ''}></label>
     `;
     };
@@ -3413,40 +3433,6 @@
       if (ageEl) prefs.maxAge = ageEl.value ? Number(ageEl.value) : null;
       saveShortlistPrefs(which, prefs);
       return prefs;
-    };
-    // Tier badge — Elite (top 20% by composite score) / Strong (next 30%). Everything below
-    // that bar is dropped before it ever reaches the UI (see tierAndFilter, Section 5B).
-    const tierBadge = (p) => p.tier === 'elite'
-      ? ' <span class="tma-badge" style="background:#3d3524;color:#e8cfa0;">elite</span>'
-      : (p.tier === 'strong' ? ' <span class="tma-badge" style="background:#28323d;color:#a8c8e0;">strong</span>' : '');
-    const badge = (p) => {
-      let out = tierBadge(p);
-      if (p.highPotential) out += ' <span class="tma-badge" style="background:#2a2f42;color:#b9c4ee;">high potential</span>';
-      return out;
-    };
-    // Home-nation vs. foreign badge (informational only — see the note in Section 5C on why
-    // this is never used to filter/exclude a target).
-    const natBadge = (p) => {
-      if (!p.nat) return '';
-      const home = MY_COUNTRY && p.nat === MY_COUNTRY;
-      return ` <span class="tma-badge" style="background:${home ? '#1c2c3d' : '#2c313780'};color:${home ? '#9fc3e0' : '#c7cdd3'};">${p.nat.toUpperCase()}${home ? ' · home' : ''}</span>`;
-    };
-    const playerLink = (p) => `https://trophymanager.com/players/${p.id}/`;
-    // Cost row shared by youth + senior cards: a live transfer-list bid when we've seen one
-    // (a real auction can settle above OR below it), plus the game's own two confirmed price
-    // points always shown when known — Sell-to-Agent (instant guaranteed sale) and Max Sell
-    // Price (the ceiling TM lets you list the player for). See Section 2C for the formulas.
-    const costRow = (p) => {
-      let out = p.price ? `<div class="tma-row"><span>Current bid</span><span class="tma-goodval">${money(p.price)}</span></div>` : '';
-      if (p.estValue) out += `<div class="tma-row"><span>Sell-to-Agent</span><span>${money(p.estValue)}</span></div>`;
-      if (p.maxValue && p.maxValue !== p.estValue) out += `<div class="tma-row"><span>Max Sell Price</span><span>${money(p.maxValue)}</span></div>`;
-      // Market-value verdict (Section 5B): is the live bid a bargain, fair, or overpriced?
-      const verdict = marketVerdict(p.price, p.estValue, p.maxValue);
-      if (verdict) {
-        const vColor = verdict.cls === 'goodval' ? '#9ece6a' : (verdict.cls === 'badval' ? '#e05555' : '#8a939c');
-        out += `<div class="tma-row"><span>Verdict</span><span style="color:${vColor};font-weight:700;">${verdict.label} <span class="tma-mini" style="font-weight:400;">— ${verdict.note}</span></span></div>`;
-      }
-      return out;
     };
 
     const shortlistHtml = (shortlist && shortlist.length) ? shortlist.map(p => `
@@ -3475,7 +3461,7 @@
         <div class="tma-row"><span>R5</span><span class="tma-goodval">${p.r5Known ? p.r5.toFixed(1) : '—'}${p.baseline != null ? ` <span class="tma-mini">(weakest ${bucketFor(p.fp)}: ${p.baseline.toFixed(1)})</span>` : ''}</span></div>
         <div class="tma-row"><span>SI</span><span>${p.asi != null ? p.asi.toLocaleString() : '—'}</span></div>
         <div class="tma-row"><span>Routine</span><span>${p.routine != null ? p.routine.toFixed(1) : '—'}</span></div>
-        ${p.wage ? `<div class="tma-row"><span>Wage</span><span>${money(p.wage)}/wk</span></div>` : ''}
+        ${p.wage ? `<div class="tma-row"><span>Wage</span><span>${fmtMoney(p.wage)}/wk</span></div>` : ''}
         ${costRow(p)}
       </div>`).join('')
       : `<div class="tma-mini">No senior shortlist built yet.</div>`;
@@ -3485,10 +3471,10 @@
     const budgetHtml = budget ? `
       <div class="tma-card">
         <h4>Spending Guidance</h4>
-        <div class="tma-row"><span>Cash on hand</span><span>${money(budget.cash)}</span></div>
-        ${budget.weeklyWage != null ? `<div class="tma-row"><span>Weekly wage bill</span><span>${money(budget.weeklyWage)}</span></div>
-        <div class="tma-row"><span>Reserve kept back (${BUDGET_WAGE_WEEKS_RESERVE}wk wages)</span><span>${money(budget.buffer)}</span></div>` : ''}
-        <div class="tma-row"><span>Recommended transfer budget</span><span class="tma-goodval">${money(budget.recommendedMax)}</span></div>
+        <div class="tma-row"><span>Cash on hand</span><span>${fmtMoney(budget.cash)}</span></div>
+        ${budget.weeklyWage != null ? `<div class="tma-row"><span>Weekly wage bill</span><span>${fmtMoney(budget.weeklyWage)}</span></div>
+        <div class="tma-row"><span>Reserve kept back (${BUDGET_WAGE_WEEKS_RESERVE}wk wages)</span><span>${fmtMoney(budget.buffer)}</span></div>` : ''}
+        <div class="tma-row"><span>Recommended transfer budget</span><span class="tma-goodval">${fmtMoney(budget.recommendedMax)}</span></div>
       </div>` : `<div class="tma-mini">Cash not read yet.</div>`;
 
     // ---- 2. Scout-report potential view (secondary source; no age/skills from endpoint) ----
@@ -3537,7 +3523,7 @@
       ${budgetHtml}
     `;
 
-    const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+    const bind = bindBtn;
 
     bind('tma-youth-build', () => {
       const status = document.getElementById('tma-youth-status');
