@@ -101,10 +101,10 @@ Tampermonkey will open a confirmation page. Click **Install**.
 
 ## Getting Started
 
-1. **Set your club** — visit your squad page (`/club/{id}/squad/`). The script detects your club automatically via `SESSION.main_id`.
+1. **Set your club** — visit your squad page (`/club/{id}/squad/`). The script detects your club automatically via the game's own `SESSION.id`.
 2. **Browse the transfer list** — each player you see gets cached for the Youth/Senior shortlists. The more you browse, the better the recommendations.
 3. **Visit a match page** — opponent expected tactics are captured from the game's own `test_lineup` data.
-4. **Open the dock** — click the ⚽ icon (bottom-right) to see the tab relevant to whatever page you're on.
+4. **Open the dock** — the panel sits bottom-right (collapsed by default); click its header to expand the tab relevant to whatever page you're on.
 
 That's it. No configuration needed.
 
@@ -123,7 +123,7 @@ The floating panel shows **one tab at a time** — whichever matches the page yo
 | League | League squad strength |
 | Match pages | Dashboard (with match stats) |
 
-The dock hides itself on `/players/` and `/club/` pages where the inline columns do the work instead.
+The dock hides itself on `/players/`, `/club/`, and `/youth-development/` pages, where the inline columns and Keep/Release verdicts do the work instead.
 
 **Dragging** — drag by the header to reposition. The panel remembers where you left it.
 
@@ -137,10 +137,11 @@ The few tunable values live in `YOUTH_CRITERIA` near the top of the script:
 
 ```js
 const YOUTH_CRITERIA = {
-  maxAge: 18,        // Maximum age for youth shortlist
-  minRoutine: 2,     // Minimum routine to qualify
-  minASI: 30,        // Minimum Skill Index
-  minR5: 10,         // Minimum R5 rating
+  maxAge: 18,             // Maximum age for the youth shortlist
+  minRoutine: 2,          // Minimum routine to qualify
+  minASI: 30,             // Minimum Skill Index
+  minR5: 10,              // Minimum R5 rating
+  highPotentialGrowth: 1.5, // potential ≥ this × current rec = "high potential" badge
 };
 ```
 

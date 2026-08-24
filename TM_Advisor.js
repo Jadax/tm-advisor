@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.6.5
+// @version      3.6.6
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -1600,16 +1600,19 @@
         const c = loadCache();
         c.lastMatchPage = { t: now(), data: d, url: path };
         saveCache(c);
-        // Populate opponent expected data from test_lineup if available
-        if (d && d.lineup) {
-          const myId = clubId;
-          const isHome = d.lineup.home && Object.keys(d.lineup.home).some(pid => {
-            const p = d.lineup.home[pid];
-            return p && String(p.club_id || '') === String(myId);
-          });
-          const oppSide = isHome ? 'away' : 'home';
-          const oppLineup = d.lineup[oppSide];
-          if (oppLineup) {
+        // Populate the opponent EXPECTED slice from test_lineup (same 'opponentExpected' key
+        // refreshAll/fetchNextMatchExpected write, so Tactics reads one source). test_lineup
+        // carries NO club ids, so our side is inferred by overlapping player ids with the
+        // cached own-squad; if the squad isn't cached yet we can't tell sides apart and
+        // safely skip rather than record the wrong team's XI.
+        if (d && d.lineup && d.lineup.home && d.lineup.away) {
+          const squad = getSlice('players');
+          const myIds = new Set((squad && squad.data ? squad.data : []).map(p => String(p.id)));
+          const overlap = (side) => Object.keys(d.lineup[side]).filter(pid => myIds.has(String(pid))).length;
+          const homeOverlap = overlap('home'), awayOverlap = overlap('away');
+          if (homeOverlap !== awayOverlap && Math.max(homeOverlap, awayOverlap) >= 5) {
+            const oppSide = homeOverlap > awayOverlap ? 'away' : 'home';
+            const oppLineup = d.lineup[oppSide];
             // Exclude substitutes and never use `p.position` (the assigned match SLOT, e.g.
             // "sub1") as a favposition fallback — same fix as fetchNextMatchExpected above.
             const starterIds = Object.keys(oppLineup).filter(pid => {
@@ -1626,7 +1629,10 @@
               xi.forEach(p => { b[bucketFor(p.fp)] = (b[bucketFor(p.fp)] || 0) + 1; });
               formation = (b.D + b.DM) + '-' + (b.M + b.OM) + '-' + b.F;
             }
-            setSlice('nextOpponentExpected', { formation, xi, side: oppSide, matchUrl: path, capturedAt: now() });
+            // Merge, don't clobber: a previously fetched mentality/style/focus for this
+            // fixture stays valid even though test_lineup can't provide them.
+            const prev = (getSlice('opponentExpected') && getSlice('opponentExpected').data) || {};
+            setSlice('opponentExpected', { ...prev, ...(formation ? { formation } : {}), xi, side: oppSide, matchUrl: path, capturedAt: now() });
           }
         }
         hookMatchAjax(); // catch match_data once it loads via XHR
@@ -2586,9 +2592,9 @@
     OM: ['pas', 'tec', 'fin', 'cro', 'pos', 'pac', 'lon'],
     F: ['fin', 'tec', 'pos', 'hea', 'pac', 'lon', 'wor'],
   };
-  const TRAIN_STRONG = 14; // a primary skill at/above this is considered solid
-  const TRAIN_WEAK = 11;   // a primary skill at/below this is a real weak spot to fix
-  const TRAIN_DEVELOP_AGE = 18; // under this age = still in the youth development bonus per TM guide
+  const TRAIN_WEAK = 11;       // a primary skill at/below this is a real weak spot to fix
+  const TRAIN_DEV_BONUS_MIN = 16; // TM guide: global development bonus doubles training drop
+  const TRAIN_DEV_BONUS_MAX = 19; //   for ages 16 up to 18y11m only — not younger, not older
 
   // Per-player training advice. Returns a sorted list with a short human readout each.
   function generateTrainingRecommendations(players) {
@@ -2599,7 +2605,9 @@
       const bucket = bucketFor(p.fp);
       const primaries = TRAIN_PRIMARY[bucket] || TRAIN_PRIMARY.M;
       const weak = primaries.filter(k => (Number(p.skills[k]) || 0) <= TRAIN_WEAK);
-      const isYouth = p.age != null && Number(p.age) < TRAIN_DEVELOP_AGE;
+      const ageNum = p.age != null ? Number(p.age) : null;
+      const isYouth = ageNum != null && ageNum <= YOUTH_CRITERIA.maxAge;
+      const inDevBonus = ageNum != null && ageNum >= TRAIN_DEV_BONUS_MIN && ageNum < TRAIN_DEV_BONUS_MAX;
       // Plateau check: compare current R5 against an earlier snapshot (roughly a month back).
       const trend = playerTrend(p.id, 30);
       const plateaued = trend && trend.r5 != null && trend.r5 <= 0.1;
@@ -2610,9 +2618,9 @@
         id: p.id, name: p.name, bucket, fp: p.fp, age: p.age,
         r5: p._r5, weak, isYouth, plateaued, focus,
         priority: isYouth || focus ? 'high' : (plateaued ? 'medium' : 'low'),
-        // A short human reason — the WHY, since users trust advice they understand.
         note: (focus ? `Weak primary: train ${focus}.` : '') +
-              (isYouth ? ' In development bonus — high training intensity.' : '') +
+              (inDevBonus ? ' Development-bonus window (16–18) — train hard now.' : '') +
+              (isYouth && !inDevBonus ? ' Young player — worth extra training focus.' : '') +
               (plateaued ? ' R5 has plateaued — check TI/coaches.' : ''),
       });
     });
@@ -3221,7 +3229,7 @@
     const trainingHtml = trainingRecs.length ? `
       <div class="tma-card">
         <h4>Training Priorities <span class="tma-mini">(${trainingRecs.length} players)</span></h4>
-        <div class="tma-mini" style="margin-bottom:8px;">Weak "primary" skills for each player's natural position, plus who's plateaued. Youths under ${TRAIN_DEVELOP_AGE} train fastest — keep their intensity high.</div>
+        <div class="tma-mini" style="margin-bottom:8px;">Weak "primary" skills for each player's natural position, plus who's plateaued. Ages 16–18 are in TM's development-bonus window — train those hardest.</div>
         ${trainingRecs.slice(0, 12).map(r => `
           <div class="tma-row">
             <span>${esc(r.name)} <span class="tma-badge">${esc(r.bucket)}</span>${r.isYouth ? ' <span class="tma-badge" style="background:#2a2f42;color:#b9c4ee;">youth</span>' : ''}</span>
