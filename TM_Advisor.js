@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.6.6
+// @version      3.7.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -35,11 +35,13 @@
  *   SECTION 3  NETWORK REFRESH       (fetch other pages, no nav)
  *   SECTION 4  LIVE-PAGE AUTO CAPTURE (+ Rou/SI/R5 columns on players
  *                                       & transfer tables; Keep/Release
- *                                       verdict on youth-development recruit
- *                                       rows; player-profile card with
+ *                                       & youth-development recruit rows ⓘ;
+ *                                       player-profile card with
  *                                       breakdown/valuation; match-page R5
  *                                       overlay + full match stats &
  *                                       goal/card/injury timeline)
+ *  ⓘ recruit verdicts are graded (STAR/KEEP/MAYBE/RELEASE) with SI-vs-age
+ *    and peak-reach detail in the row tooltip
  *   SECTION 5  TACTICS ENGINE        (formation + settings picker;
  *                                       position-aware substitution orders)
  *   SECTION 5B YOUTH FINDER          (transfer-list-only talent shortlist)
@@ -1369,14 +1371,55 @@
 
   // ---- Youth Development recruit advisor ----
   // The weekly /youth-development/ pull lists newly generated recruits who aren't signed yet.
-  // Reuses the SAME YOUTH_CRITERIA hard floors (Section 5B) that already define "worth
-  // keeping" for the transfer-list Youth Finder — one set of thresholds for youth, not two —
-  // to stamp a Keep/Release verdict directly on each recruit row. The pull page only shows
-  // partial data (stars, not raw skills), so full skills are fetched per recruit via
-  // tooltip.ajax.php (already confirmed to work for any player_id, see fetchPlayerTooltip
-  // above). filterYouth/YOUTH_CRITERIA are defined later in the file (Section 5B) but hoisted
-  // function declarations make them available here.
+  // Verdict grading stands on two cited reference points:
+  //  - YOUTH_CRITERIA hard floors (Section 5B, shared with the transfer-list Youth Finder):
+  //    SI 30 is the base bar for a 16y0m recruit.
+  //  - Peak skill-sum ceilings from "TM Player Enhanced 1.7.0" (its PEAK_SUMS table): an
+  //    outfield player's physique/tactical sums max at 80 each and technical sum at 120
+  //    (GK: 80/60/80). A recruit's current sums as a % of those ceilings shows how developed
+  //    each side of their game already is at pull time.
+  // The ~30 SI at 16y0m + ~0.5 SI/month maturity drift, and the star-tier ranking that adds
+  // +8 SI above expectation, are OUR heuristics - comments below say "approx" and the UI
+  // tooltip labels the whole read as approximate. Nothing here is a game formula.
   const YOUTH_ROW_FETCH_CAP = 40; // a weekly pull is ~10-20 recruits; the cap is a runaway guard
+  // Category sums use the exact skill groupings TM Player Enhanced (1.7.0) computes per
+  // category (its playerSkillSums block), so our reach% is directly comparable to the
+  // community's, and the ceilings are its PEAK_SUMS maxes.
+  const YOUTH_PEAK_MAX = { outfield: { phy: 80, tac: 80, tec: 120 }, gk: { phy: 80, tac: 60, tec: 80 } };
+  function youthCategorySums(p) {
+    const s = p.skills || {}, n = v => Number(v) || 0;
+    if (bucketFor(p.fp) === 'GK') {
+      return { isGK: true,
+        phy: n(s.str) + n(s.sta) + n(s.pac) + n(s.jum),
+        tac: n(s.one) + n(s.ari) + n(s.com),
+        tec: n(s.han) + n(s.ref) + n(s.kic) + n(s.thr) };
+    }
+    return { isGK: false,
+      phy: n(s.str) + n(s.sta) + n(s.pac) + n(s.hea),
+      tac: n(s.mar) + n(s.tac) + n(s.wor) + n(s.pos),
+      tec: n(s.pas) + n(s.cro) + n(s.tec) + n(s.fin) + n(s.lon) + n(s.set) };
+  }
+  // Graded pull verdict from SI vs age + per-category peak reach. Expectation: SI 30 at the
+  // 16y0m pull date (YOUTH_CRITERIA.minASI), drifting +0.5 SI per mature month afterwards
+  // (approx). Tiers: STAR (≥ +8 above expectation), KEEP (at or above), MAYBE (within 5
+  // below), RELEASE (below that). ageMonthsOf handles the tooltip's precise age incl. months.
+  function youthPullVerdict(p) {
+    const ageMonths = ageMonthsOf(p);
+    if (!ageMonths) return null;
+    const expectedSI = YOUTH_CRITERIA.minASI + Math.max(0, ageMonths - 192) * 0.5;
+    const si = Number(p.asi) || 0;
+    const sums = youthCategorySums(p);
+    const peaks = sums.isGK ? YOUTH_PEAK_MAX.gk : YOUTH_PEAK_MAX.outfield;
+    const reach = ['phy', 'tac', 'tec'].map(k => k + ' ' + Math.round(sums[k] / peaks[k] * 100) + '%');
+    let verdict, cls;
+    if (si >= expectedSI + 8) { verdict = 'STAR'; cls = '#9ece6a'; }
+    else if (si >= expectedSI) { verdict = 'KEEP'; cls = '#6fae7c'; }
+    else if (si >= expectedSI - 5) { verdict = 'MAYBE'; cls = '#e0a95f'; }
+    else { verdict = 'RELEASE'; cls = '#d97a70'; }
+    const y = Math.floor(ageMonths / 12), m = ageMonths % 12;
+    return { verdict, cls, isGK: sums.isGK,
+      note: 'approx: SI ' + Math.round(si) + ' vs ~' + Math.round(expectedSI) + ' expected at ' + y + 'y' + m + 'm. Peak reach: ' + reach.join(', ') + '. Heuristic, not exact.' };
+  }
   async function enhanceYouthDevelopmentPage() {
     const rows = [...document.querySelectorAll('tr')]
       .filter(tr => findPlayerLinkInRow(tr) && !tr.dataset.tmaYouthDone)
@@ -1408,13 +1451,14 @@
         const p = normaliseTooltipPlayer(await fetchPlayerTooltip(link.id));
         if (!p) { cells.forEach(td => { td.textContent = '-'; }); continue; }
         ensureR5(p);
-        const keep = filterYouth([p], YOUTH_CRITERIA).length > 0;
+        const v = youthPullVerdict(p);
         cells[0].textContent = p.routine != null ? Number(p.routine).toFixed(1) : '-';
         cells[1].textContent = p.asi != null ? Number(p.asi).toLocaleString() : '-';
         cells[2].textContent = (p._r5 != null && !isNaN(p._r5)) ? Number(p._r5).toFixed(1) : '-';
         cells[2].style.color = '#e0a95f'; cells[2].style.fontWeight = 'bold';
-        cells[3].textContent = keep ? 'KEEP' : 'RELEASE';
-        cells[3].style.color = keep ? '#6fae7c' : '#d97a70'; cells[3].style.fontWeight = 'bold';
+        cells[3].textContent = v ? v.verdict : '?';
+        cells[3].style.color = v ? v.cls : '#8a939c'; cells[3].style.fontWeight = 'bold';
+        cells[3].title = v ? v.note : 'age not available - cannot grade the pull';
       } catch (e) {
         cells.forEach(td => { td.textContent = '-'; });
         console.warn('TM Advisor: youth-development row failed', e);
@@ -1790,20 +1834,31 @@
     '4-5-1': [['GK'], ['D-L', 'D-C', 'D-C', 'D-R'], ['M-L', 'M-C', 'M-C', 'M-R', 'OM-C'], ['F']],
     '3-5-2': [['GK'], ['D-C', 'D-C', 'D-C'], ['M-L', 'DM-C', 'M-C', 'M-C', 'M-R'], ['F', 'F']],
     '4-3-3': [['GK'], ['D-L', 'D-C', 'D-C', 'D-R'], ['DM-C', 'M-C', 'M-C'], ['OM-L', 'F', 'OM-R']],
+    // The other 3-back shapes the current meta plays (3-1-4-2, 3-2-3-2, 3-4-3). Slot names
+    // reuse the same bucket-suffix vocabulary as the four originals, so positionPenalty
+    // multipliers and pitch rendering work unchanged. Exact in-game slot layouts may differ
+    // slightly from these templates - treat these three as approximations of the shape.
+    '3-1-4-2': [['GK'], ['D-C', 'D-C', 'D-C'], ['DM-C'], ['M-L', 'M-C', 'M-C', 'M-R'], ['F', 'F']],
+    '3-2-3-2': [['GK'], ['D-C', 'D-C', 'D-C'], ['DM-C', 'DM-C'], ['M-L', 'M-C', 'M-R'], ['F', 'F']],
+    '3-4-3': [['GK'], ['D-C', 'D-C', 'D-C'], ['M-L', 'M-C', 'M-C', 'M-R'], ['F', 'F', 'F']],
   };
   const FORMATIONS = Object.fromEntries(Object.entries(FORMATION_ROWS).map(([k, rows]) => [k, rows.flat()]));
 
   // ---- Formation counters (community-sourced meta) ----
-  // A qualitative "which formation tends to beat which" map, distilled from TM community
-  // discussion (crowding a weak flank, overloading a 3-CB back line, matching a 1-striker
-  // with a spare CDM, etc.). This is meta-knowledge, NOT a game formula — treat it as a
-  // nudge on top of the R5-based pick, not a hard override. Used to surface a
-  // "counter suggestion" when we know the opponent's formation.
+  // A qualitative "which formation tends to beat which" map. Meta direction (user-observed
+  // over recent seasons, consistent with community discussion): 3-back line-ups currently
+  // out-perform 4-back ones, so we counter 4-back opponents with the 3-5-2 wing overload,
+  // and counter 3-back opponents with the wide 4-3-3 triangle instead of another 4-back
+  // flat shape that would just lose the same meta battle. This is meta-knowledge, NOT a
+  // game formula - treat as a nudge on top of the R5-based pick, not an override.
   const FORMATION_COUNTERS = {
-    '4-4-2': ['3-5-2'],   // two strikers press a 3-CB line; wide Mids handle the 3-5-2 wings
-    '4-5-1': ['4-3-3'],   // spare DM/mid trio + lone striker can sit on 4-3-3's three forwards
-    '3-5-2': ['4-4-2'],   // numbers in central/flank midfield vs the 3-5-2 wings; two F vs three D
-    '4-3-3': ['3-5-2'],   // wide triangles push the 3-5-2 flanks
+    '4-4-2': ['3-5-2'],     // two strikers press a 3-CB line; wide Mids handle the 3-5-2 wings
+    '4-5-1': ['3-5-2'],     // 3 wings + 2 F overload the 4-back shape's sparse wings
+    '4-3-3': ['3-5-2'],     // 3-5-2 crowds the centre the 4-3-3 trio leaves thin
+    '3-5-2': ['4-3-3'],     // width pulls the 3-CB line apart instead of meeting it head-on
+    '3-1-4-2': ['4-3-3'],
+    '3-2-3-2': ['4-3-3'],
+    '3-4-3': ['3-5-2'],     // mirror the wing numbers, keep the meta-favoured 3-back core
   };
   // Difficulty tiers for a fixture, based on the opponent's best-XI R5 vs ours. This reframes
   // the same percentage edge the mentality pick already uses into an at-a-glance "tough week?"
@@ -1902,11 +1957,11 @@
     return { lineup, subs, totalRec, formation: formationKey };
   }
 
-  // Community consensus (per user's own match-history observation) is that 352 variants
-  // are currently over-performing relative to what the match engine's public numbers would
-  // suggest. We apply a small, clearly-labelled nudge rather than silently overriding pure
-  // R5 math — remove FORMATION_BIAS['3-5-2'] below if the meta shifts back.
-  const FORMATION_BIAS = { '3-5-2': 1.04 };
+  // Community consensus (per user's own match-history observation) is that all 3-back
+  // variants are currently over-performing relative to what the match engine's public
+  // numbers would suggest. We apply a small, clearly-labelled nudge rather than silently
+  // overriding pure R5 math - remove entries here if the meta shifts back.
+  const FORMATION_BIAS = { '3-5-2': 1.04, '3-1-4-2': 1.04, '3-2-3-2': 1.04, '3-4-3': 1.04 };
 
   function bestFormation(players, opponentData) {
     players.forEach(ensureR5); // idempotent: won't overwrite star-estimate R5s
@@ -1991,8 +2046,8 @@
     }
     let mentality = 4; // Normal
     let reasoning = [];
-    if (myXI.formation === '3-5-2') {
-      reasoning.push('Formation nudged toward 3-5-2: recent results suggest it is currently over-performing versus what raw R5 math alone would predict — worth re-checking this bias periodically.');
+    if (FORMATION_BIAS[myXI.formation]) {
+      reasoning.push('Formation weighted toward ' + myXI.formation + ': 3-back line-ups are currently over-performing versus what raw R5 math alone would predict - worth re-checking this bias periodically.');
     }
     if (oppAvg != null) {
       // R5 scales up with overall player level, so compare as a % difference rather than
@@ -2203,7 +2258,16 @@
     const routine = Number(p.routine) || 0;
     const asi = Number(p.asi) || 0;
     let score = r5 + Math.log10(1 + asi) * 2 + Math.min(routine, 20) * 0.1;
-    if (opts.youth) score += Math.max(0, 18 - age) * 1.5;
+    if (opts.youth) {
+      score += Math.max(0, 18 - age) * 1.5;
+      // Scout-report growth headroom (potential/rec, Section 3) is the single best signal
+      // of how much value we still get to buy, so it earns real weight: every 0.25x above
+      // rec adds ~3 points (heuristic, understood to over-reward 2x+ reports - and that is
+      // deliberate, those are exactly the gems worth ranking first). growth can arrive as
+      // opts.growth (from rankYouth, which merges scout report + player fields).
+      const g = opts.growth != null ? Number(opts.growth) : (p.growthMultiple != null ? Number(p.growthMultiple) : null);
+      if (g != null && g > 1) score += Math.min((g - 1), 1.5) * 12;
+    }
     const cost = p._cost != null ? p._cost : (p._price || estimateBankPrice(p) || 0);
     if (cost > 0) score -= Math.log10(1 + cost / 1e6) * (opts.youth ? 1 : 2);
     const wage = Number(p.wage) || 0;
@@ -2358,7 +2422,7 @@
       };
     });
     const filtered = applyUserPrefs(withMeta, prefs);
-    const scored = filtered.map(p => ({ ...p, _score: scoutScore(p, { youth: true }) }));
+    const scored = filtered.map(p => ({ ...p, _score: scoutScore(p, { youth: true, growth: p._growth }) }));
     scored.sort((a, b) => b._score - a._score);
     return tierAndFilter(scored).map(p => ({ ...p, _topTalent: p._tier === 'elite' }));
   }
