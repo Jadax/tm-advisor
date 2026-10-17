@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.7.0
+// @version      3.7.1
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -1879,7 +1879,7 @@
       counter = {
         for: oppFormation,
         suggested: FORMATION_COUNTERS[oppFormation][0],
-        note: `community meta: ${FORMATION_COUNTERS[oppFormation][0]} tends to counter ${oppFormation} — but your highest-R5 XI (${myFormation}) is usually the safer pick unless the R5 gap is close.`,
+        note: `community meta: ${FORMATION_COUNTERS[oppFormation][0]} tends to counter ${oppFormation}. If the auto-counter pick below isn't already that formation, it means our best META XI is decisively stronger (more than +3%) and stays the safer choice.`,
       };
     }
     return { counter, difficulty: fixtureDifficulty(myAvg, oppAvg) };
@@ -1963,14 +1963,26 @@
   // overriding pure R5 math - remove entries here if the meta shifts back.
   const FORMATION_BIAS = { '3-5-2': 1.04, '3-1-4-2': 1.04, '3-2-3-2': 1.04, '3-4-3': 1.04 };
 
-  function bestFormation(players, opponentData) {
+  function bestFormation(players, opponentData, oppFormation) {
     players.forEach(ensureR5); // idempotent: won't overwrite star-estimate R5s
+    // Auto-counter: once the opponent has been scanned (expected line-up from the match
+    // page, else their most-recent formation), any formation listed as a counter for theirs
+    // gets a +3% multiplier. The meta FORMATION_BIAS (3-backs) stacks on top, so outside of
+    // a real R5 mismatch the pick lands on a meta formation that also counters smaller
+    // spreads first. The nudge only flips the pick within a ~3% strength band - we never
+    // override a decisively stronger XI. 3% is a heuristic band, not a game formula.
+    const counterSet = (oppFormation && FORMATION_COUNTERS[oppFormation]) || null;
     let best = null;
     Object.keys(FORMATIONS).forEach(key => {
       const res = pickBestXI(players, key, opponentData);
-      const biased = res.totalRec * (FORMATION_BIAS[key] || 1);
+      const countered = !!counterSet && counterSet.includes(key);
+      const biased = res.totalRec * (FORMATION_BIAS[key] || 1) * (countered ? 1.03 : 1);
+      res._countered = countered;
       if (!best || biased > best._biasedRec) { res._biasedRec = biased; best = res; }
     });
+    if (best._countered) {
+      best._counterNote = `Picked to counter the opponent's ${oppFormation}. Meta bias (3-backs) still applies, so this only deviates if the counter option is genuinely close in strength.`;
+    }
     best.rows = FORMATION_ROWS[best.formation];
     return best;
   }
@@ -2049,6 +2061,7 @@
     if (FORMATION_BIAS[myXI.formation]) {
       reasoning.push('Formation weighted toward ' + myXI.formation + ': 3-back line-ups are currently over-performing versus what raw R5 math alone would predict - worth re-checking this bias periodically.');
     }
+    if (myXI._countered) reasoning.push('Formation auto-counters the scanned opponent: ' + myXI._counterNote);
     if (oppAvg != null) {
       // R5 scales up with overall player level, so compare as a % difference rather than
       // an absolute point gap — a 5-point gap means very different things at R5 40 vs R5 140.
@@ -3153,7 +3166,11 @@
       return;
     }
     const players = playersSlice.data.filter(p => !p.ban || p.ban === '0').filter(p => !p.inj);
-    const best = bestFormation(players, oppSlice && oppSlice.data);
+    // Opponent formation for the auto-counter pick: this fixture's expected line-up first,
+    // their most-recent actual formation second (both confirmed sources, Section 3).
+    const oppFormation = (expectedSlice && expectedSlice.data && expectedSlice.data.formation)
+      || (scoutSlice && scoutSlice.data && scoutSlice.data.recentFormation) || null;
+    const best = bestFormation(players, oppSlice && oppSlice.data, oppFormation);
     const settings = recommendTacticSettings(best, oppSlice && oppSlice.data, scoutSlice && scoutSlice.data, expectedSlice && expectedSlice.data);
     const startingPlayers = best.lineup.filter(l => l.player).map(l => l.player);
     const usedIds = new Set(startingPlayers.map(p => p.id));
