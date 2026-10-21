@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.7.1
+// @version      3.7.2
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -2813,9 +2813,13 @@
     font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif; display:flex; flex-direction:column;
     transition:max-height .2s var(--tma-ease), box-shadow .2s var(--tma-ease); }
   #tma-panel:not(.tma-collapsed) { box-shadow:0 22px 52px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.35); }
-  #tma-panel.tma-collapsed { max-height:60px; }
-  #tma-panel.tma-collapsed .tma-tabs, #tma-panel.tma-collapsed .tma-body { display:none; }
-  #tma-panel.tma-collapsed .tma-head:hover { background:#242428; }
+  /* ---- Collapsed = compact pill, not a full-width bar: shrink-wraps to just
+     "TM Advisor ›" (~90px wide), so the minimized state takes almost no pitch. ---- */
+  #tma-panel.tma-collapsed { max-height:44px; width:auto; opacity:.92; }
+  #tma-panel.tma-collapsed .tma-head-row { width:max-content; }
+  #tma-panel.tma-collapsed .tma-tabs, #tma-panel.tma-collapsed .tma-body, #tma-panel.tma-collapsed .tma-sub { display:none; }
+  #tma-panel.tma-collapsed .tma-head { padding:10px 14px; border-bottom:none; }
+  #tma-panel.tma-collapsed .tma-head:hover { background:#242428; opacity:1; }
   /* ---- Header (sticky, draggable, doubles as the expand/collapse target) ---- */
   .tma-head { padding:12px 14px 0; background:var(--tma-bg-2); border-bottom:1px solid #33333a80;
     cursor:move; user-select:none; position:relative; z-index:2; flex:0 0 auto; transition:background .15s var(--tma-ease); }
@@ -2983,10 +2987,8 @@
     });
   }
 
-  const COLLAPSE_KEY = 'tmAdvisor_panelCollapsed';
-
   // The panel IS the advisor — no separate floating button. It sits docked bottom-right,
-  // starts collapsed to just its header bar, and expands in place when you click the header
+  // starts collapsed to a compact pill (~44px), and expands in place when you click the header
   // or the chevron. Nothing else to summon, nothing else floating on the page.
   function buildPanel() {
     const panel = document.createElement('div');
@@ -3007,14 +3009,13 @@
     document.body.appendChild(panel);
     makeElementDraggable(panel, document.getElementById('tma-drag-handle'), 'tmAdvisor_panelPos');
 
-    // Collapsed by default on first load so the panel never covers game content unasked;
-    // remembers whatever state you leave it in.
-    const savedCollapsed = localStorage.getItem(COLLAPSE_KEY);
-    if (savedCollapsed === null || savedCollapsed === '1') panel.classList.add('tma-collapsed');
+    // ALWAYS start minimized on every page load - expanding is a deliberate click, never
+    // a carried-over state. Nothing persists whether it was open, so the panel can never
+    // ambush game content you're trying to play on.
+    panel.classList.add('tma-collapsed');
 
     const setCollapsed = (collapsed) => {
       panel.classList.toggle('tma-collapsed', collapsed);
-      localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0');
       if (!collapsed) openTab(document.querySelector('.tma-tab.active')?.dataset.tab || contextTabForPath());
     };
     panel.querySelector('#tma-collapse-toggle').addEventListener('click', (e) => {
