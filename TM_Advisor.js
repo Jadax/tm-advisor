@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.13.2
+// @version      3.14.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -54,6 +54,9 @@
  *   SECTION 5H AUTOPILOT             (off by default; once per match, kickoff-guarded)
  *   SECTION 5I LEARNING              (division match bank, fitted result model,
  *                                       evidence-gated mentality/style, graded predictions)
+ *   SECTION 5J TRAINING GROUPS       (each player in the drill his position needs)
+ *   SECTION 5K FACILITY UPGRADES     (copilot step, off by default, rule-based)
+ *   SECTION 5L MARKET SCAN           (searches the transfer list itself; never bids)
  *   SECTION 6  STADIUM ENGINE        (upgrade ROI ranking)
  *   SECTION 7  UI                    (styles, panel; ONE context-relevant
  *                                       tab per page)
@@ -1565,7 +1568,8 @@
       ageMonths: raw.age != null && raw.age !== '' ? Math.round(parseFloat(raw.age) * 12 + months) : null,
       asi: parseNumericString(raw.skill_index), routine: parseNumericString(raw.routine) || 0,
       rec: parseNumericString(raw.rec_sort) || 0,
-      wage: parseNumericString(raw.wage), // confirmed present on tooltip.ajax.php by "TM Player Enhanced"
+      // Arrives as HTML ("<span class='coin'>2,511,864</span>"); strip tags before parsing.
+      wage: raw.wage != null ? (parseMoney(String(raw.wage).replace(/<[^>]+>/g, '')) || null) : null, // present per "TM Player Enhanced"
       skills,
     };
   }
@@ -2340,8 +2344,8 @@
    *  these to whatever "top talent" means at your level.
    * ============================================================ */
   const YOUTH_CRITERIA = {
-    maxAge: 18,
-    minRoutine: 2,
+    maxAge: 20,          // the market lists nobody under 18 (live), so "youth" there is 18-20
+    minRoutine: 0,       // routine comes from matches played — near 0 for most youths
     minASI: 30,
     minR5: 10,
     highPotentialGrowth: 1.5,
@@ -2547,7 +2551,7 @@
       // NOT automatically included: an unconfirmed nationality is not a confirmed home-nation
       // player. (The previous version let unknown-nationality players through either way,
       // which is why the toggle looked broken — most rows have `nat` unset.)
-      if (!prefs.includeForeign) {
+      if (prefs.includeForeign === false) {
         if (!MY_COUNTRY || p.nat !== MY_COUNTRY) return false;
       }
       if (maxCost) {
@@ -2812,7 +2816,9 @@
     let weeklyWage = null;
     if (finSlice && finSlice.data && finSlice.data.weekly) {
       const row = Object.entries(finSlice.data.weekly).find(([k]) => /wage/i.test(k));
-      if (row && row[1] && row[1].length) weeklyWage = parseMoney(row[1][row[1].length - 1]);
+      // Finances lists wages as a negative ("-5,035,686"); a negative reserve used to INFLATE the
+      // budget by 24 weeks of wages (seen live: 304M cap instead of 244M).
+      if (row && row[1] && row[1].length) weeklyWage = Math.abs(parseMoney(row[1][row[1].length - 1]));
     }
     const buffer = weeklyWage != null ? weeklyWage * BUDGET_WAGE_WEEKS_RESERVE : 0;
     const spendable = Math.max(0, cash - buffer);
@@ -3111,13 +3117,61 @@
     return entry;
   }
 
-  async function runAutopilot(force) {
-    const prefs = autopilotPrefs();
+  const COPILOT_STEPS_KEY = 'tmAdvisor_copilotSteps'; // { training, tactics, facilities }
+  function copilotSteps() {
+    let st = {};
+    try { st = JSON.parse(localStorage.getItem(COPILOT_STEPS_KEY)) || {}; } catch (e) {}
+    return { training: st.training !== false, tactics: st.tactics !== false, facilities: st.facilities === true };
+  }
+  function setCopilotSteps(st) {
+    try { localStorage.setItem(COPILOT_STEPS_KEY, JSON.stringify(st)); } catch (e) {}
+    setAutopilotPrefs(autopilotPrefs()); // a changed step earns a fresh run for this match
+  }
+
+  // Tactics step: the match plan (XI, bench, roles, settings, orders), saved and read back.
+  async function applyMatchPlanStep(nm, dryRun) {
+    const kickoff = parseKickoff(nm.when);
+    if (!kickoff) return { ok: false, text: `kickoff time unreadable ("${nm.when}")` };
+    if (kickoff - now() < TACTICS_LOCK_MS + AUTOPILOT_SAFETY_MS) return { ok: true, text: `skipped — the ${tmTimeOf(nm.when)} match locks an hour before kickoff` };
+    const ready = opponentReadiness();
+    if (!ready.ready) return { ok: false, text: ready.text };
+    await loadTacticsPage();
+    const sl = k => { const x = getSlice(k); return x && x.data; };
+    const plan = buildMatchPlan(tacticsPageSquad(), sl('opponent'), sl('opponentScouting'), sl('opponentExpected'), { restBanRisk: restBanRisk() });
+    const target = planToTactic(plan);
+    const saved = await readSavedTactic();
+    const changes = tacticDiff(target, saved);
+    const settings = `${MENTALITY[plan.settings.mentality]} / ${ATT_STYLE[plan.settings.style]} / ${FOCUS_SIDE[plan.settings.focus]}`;
+    if (dryRun) return { ok: true, text: changes.length ? `would change ${changes.length} (${changes.map(c => c[0]).join(', ')}) — ${settings}` : 'already matches the plan' };
+    if (changes.length) { setSlice('tacticsBackup', saved); await writeTactic(target, saved); }
+    const mismatches = tacticMismatches(target, await readSavedTactic());
+    if (mismatches.length) return { ok: false, text: `saved, but these didn't stick: ${mismatches.join(', ')}` };
+    recordPrediction(plan);
+    return { ok: true, text: (changes.length ? `${changes.length} change(s) saved and verified` : 'already matched the plan') + ` — ${settings}` };
+  }
+
+  // One run = everything the next match needs: opponent scan → training groups → tactics, bench,
+  // roles & orders → facility upgrade. Each step obeys its own switch; one step failing is logged
+  // and the rest still run. "Prepare match" runs it now; the autopilot runs it once per match.
+  async function runCopilot(force, onProgress) {
+    const prefs = autopilotPrefs(), steps = copilotSteps(), dry = !!prefs.dryRun;
     if (!prefs.enabled && !force) return null;
     const state = (getSlice('autopilot') || { data: {} }).data || {};
     if (!force && state.lastTry && now() - state.lastTry < AUTOPILOT_GAP_MS) return null;
     setSlice('autopilot', { ...state, lastTry: now() }); // claimed first, so a second open tab backs off
+    const say = t => { if (onProgress) onProgress(t); };
+    const lines = [];
+    let allOk = true;
+    const step = async (label, fn) => {
+      say(label + '…');
+      try {
+        const r = await fn();
+        lines.push(`${r.ok ? '✔' : '⚠'} ${label}: ${r.text}`);
+        if (!r.ok) allOk = false;
+      } catch (e) { lines.push(`⚠ ${label}: failed — ${e.message}`); allOk = false; }
+    };
     try {
+      say('Reading the next fixture…');
       const homeDoc = await fetchDoc('/home/');
       measureTmOffset(homeDoc); // fresh render = an exact clock reading
       const home = parseHome(homeDoc);
@@ -3127,34 +3181,14 @@
       if (!matchId) return autopilotLog('No upcoming match found.', true);
       if (!force && state.doneMatchId === matchId) return null; // once per match: later manual edits stand
       const vs = nm.home && String(nm.home.id) === clubId ? nm.away.name : nm.home.name;
-      const kickoff = parseKickoff(nm.when);
-      if (!kickoff) return autopilotLog(`Kickoff time unreadable ("${nm.when}") — nothing saved.`, false, { matchId });
-      if (kickoff - now() < TACTICS_LOCK_MS + AUTOPILOT_SAFETY_MS) return autopilotLog(`Too close to the ${tmTimeOf(nm.when)} kickoff v ${vs}: tactics lock an hour before — nothing saved.`, false, { matchId });
-      await refreshAll(); // next opponent's squad + recent tactics + expected line-up
-      const ready = opponentReadiness();
-      if (!ready.ready) return autopilotLog(ready.text + ' — nothing saved.', false, { matchId });
-      await loadTacticsPage();
-      const sl = k => { const s = getSlice(k); return s && s.data; };
-      const plan = buildMatchPlan(tacticsPageSquad(), sl('opponent'), sl('opponentScouting'), sl('opponentExpected'), { restBanRisk: restBanRisk() });
-      const target = planToTactic(plan);
-      const saved = await readSavedTactic();
-      const changes = tacticDiff(target, saved);
-      const markDone = () => setSlice('autopilot', { ...getSlice('autopilot').data, doneMatchId: matchId });
-      if (prefs.dryRun) {
-        markDone();
-        return autopilotLog(`Dry run v ${vs}: ${changes.length} change(s) planned, nothing saved.`, true, { matchId, changes });
-      }
-      if (changes.length) {
-        setSlice('tacticsBackup', saved);
-        await writeTactic(target, saved);
-      }
-      const mismatches = tacticMismatches(target, await readSavedTactic());
-      if (mismatches.length) return autopilotLog(`Saved v ${vs}, but these didn't stick: ${mismatches.join(', ')}.`, false, { matchId });
-      markDone();
-      recordPrediction(plan);
-      return autopilotLog(changes.length ? `Applied v ${vs}: ${changes.length} change(s), verified.` : `Tactic v ${vs} already matched the plan.`, true, { matchId, changes });
+      await step('Opponent scan', async () => { await refreshAll(); const r = opponentReadiness(); return { ok: r.ready, text: r.text }; });
+      if (steps.training) await step('Training groups', () => applyTrainingGroups(dry));
+      if (steps.tactics) await step('Tactics & orders', () => applyMatchPlanStep(nm, dry));
+      if (steps.facilities) await step('Facilities', () => applyFacilityUpgrade(dry));
+      if (allOk) setSlice('autopilot', { ...getSlice('autopilot').data, doneMatchId: matchId });
+      return autopilotLog(`${dry ? 'Dry run' : force ? 'Prepared' : 'Autopilot'} v ${vs}`, allOk, { matchId, lines });
     } catch (e) {
-      return autopilotLog('Autopilot failed: ' + e.message, false);
+      return autopilotLog('Copilot failed: ' + e.message, false, { lines });
     }
   }
 
@@ -3328,6 +3362,174 @@
   }
 
   /* ============================================================
+   *  SECTION 5J — TRAINING GROUPS
+   *  ------------------------------------------------------------
+   *  Puts each player in the standard group that trains what matters for
+   *  his position. Focus skills are TM's own (training page `team_tooltips`,
+   *  read live 2026-11-01). Per TM's guide (/user-guide/advanced/training/)
+   *  25% of standard training goes to the focus skills, 75% at random, and a
+   *  skill at 20 passes its share back to the pool. Custom programmes need
+   *  TM Pro — out of scope.
+   * ============================================================ */
+  const TRAINING_GROUPS = {
+    1: { name: 'Technical', skills: ['tec', 'pas', 'set'] },
+    2: { name: 'Fitness', skills: ['str', 'sta', 'pac', 'wor'] },
+    3: { name: 'Tactical', skills: ['wor', 'pos', 'pas'] },
+    4: { name: 'Finishing', skills: ['fin', 'lon', 'hea'] },
+    5: { name: 'Defending', skills: ['mar', 'tac', 'pos', 'hea'] },
+    6: { name: 'Winger', skills: ['cro', 'pac', 'tec'] },
+    7: { name: 'Goalkeeping', skills: null },
+  };
+  const OUTFIELD_ORDER = ['str', 'sta', 'pac', 'mar', 'tac', 'wor', 'pos', 'pas', 'cro', 'tec', 'hea', 'fin', 'lon', 'set']; // R5 weight-column order (outfieldSkillArray)
+  // Value of a group's focus share for one player at one position: the mean R5 weight of its
+  // focus skills; a skill already at 20 counts at the row's average (its share goes random).
+  function trainingGroupValue(p, posIdx, group) {
+    const w = WEIGHT_R5[posIdx];
+    const avg = w.reduce((a, b) => a + b, 0) / w.length;
+    const vals = group.skills.map(k => (Number(p.skills && p.skills[k]) || 0) >= 20 ? avg : w[OUTFIELD_ORDER.indexOf(k)]);
+    return vals.reduce((a, b) => a + b, 0) / vals.length;
+  }
+  // Each player is trained for his slot in the current best XI, else his best natural position.
+  function trainingPlan(squad) {
+    const players = squad.map(p => ({ ...p }));
+    const xi = bestFormation(players.filter(p => (!p.ban || p.ban === '0') && !p.inj));
+    const slotOf = {};
+    xi.lineup.forEach(l => { if (l.player) slotOf[String(l.player.id)] = l.slot; });
+    return players.map(p => {
+      if (bucketFor(p.fp) === 'GK') return { p, group: 7, slot: 'gk', starter: !!slotOf[String(p.id)] };
+      const slot = slotOf[String(p.id)] || parseFavPositionCodes(p.fp).map(c => c === 'f' ? 'fc' : c)
+        .filter(k => SLOT_NUM[k] != null).sort((a, b) => slotRating(p, b) - slotRating(p, a))[0] || 'mc';
+      const posIdx = getPositionIndex(slot);
+      const ranked = [1, 2, 3, 4, 5, 6].map(g => ({ g, v: trainingGroupValue(p, posIdx, TRAINING_GROUPS[g]) })).sort((a, b) => b.v - a.v);
+      return { p, group: ranked[0].g, slot, starter: !!slotOf[String(p.id)] };
+    });
+  }
+  async function readTrainingGroups() {
+    const d = JSON.parse(await tmPost('/ajax/training_get.ajax.php', { type: 'get' }));
+    return Object.fromEntries((d.players_list || []).map(x => [String(x.id), String(x.training)]));
+  }
+  // Moves only the players whose group is wrong, then re-reads the server to confirm.
+  async function applyTrainingGroups(dryRun) {
+    const current = await readTrainingGroups();
+    await loadTacticsPage();
+    const plan = trainingPlan(tacticsPageSquad()).filter(x => current[String(x.p.id)] != null);
+    const moves = plan.filter(x => current[String(x.p.id)] !== String(x.group));
+    const label = m => `${m.p.name.split(' ').pop()} → ${TRAINING_GROUPS[m.group].name}`;
+    if (dryRun || !moves.length) return { ok: true, text: moves.length ? `would move ${moves.length}: ${moves.map(label).join(', ')}` : 'all groups already right', moves };
+    for (const m of moves) {
+      await sleep(150);
+      await tmPost('/ajax/training_post.ajax.php', { type: 'player_pos', player_id: m.p.id, team_id: m.group });
+    }
+    const after = await readTrainingGroups();
+    const wrong = moves.filter(m => after[String(m.p.id)] !== String(m.group));
+    return { ok: !wrong.length, text: wrong.length ? `${wrong.length} of ${moves.length} moves didn't stick: ${wrong.map(label).join(', ')}` : `moved ${moves.length}, verified: ${moves.map(label).join(', ')}`, moves };
+  }
+
+  /* ============================================================
+   *  SECTION 5K — FACILITY UPGRADES  (copilot step, off by default)
+   *  ------------------------------------------------------------
+   *  "Required" = the Stadium tab's own ranking (analyseStadium): training/
+   *  youth tier first, then income facilities paying back within
+   *  FACILITY_MAX_PAYBACK_WEEKS. Own guard rails: never a facility already
+   *  building, never one with a maintenance warning, never the seat count,
+   *  one per run, and only from cash beyond the wage reserve (budgetGuidance).
+   * ============================================================ */
+  const FACILITY_MAX_PAYBACK_WEEKS = 26; // own heuristic: about two TM seasons
+  function pickFacilityUpgrade(stadiumData) {
+    const ctx = stadiumContext(stadiumData);
+    const budget = budgetGuidance();
+    if (!ctx.fd || !budget) return { pick: null, why: 'cash or wage data missing' };
+    const eligible = analyseStadium(ctx.fd, ctx.cash, ctx.attendanceRef, ctx.financials).filter(r =>
+      r.key !== 'stadium' && !(ctx.fd[r.key] && ctx.fd[r.key].building) && !r.sustainabilityWarning && r.cost <= budget.spendable
+      && (r.tier === 0 || (r.tier === 1 && r.paybackWeeks != null && r.paybackWeeks <= FACILITY_MAX_PAYBACK_WEEKS)));
+    return { pick: eligible[0] || null, building: Object.values(ctx.fd).filter(f => f && f.building).map(f => f.title) };
+  }
+  async function applyFacilityUpgrade(dryRun) {
+    const before = parseStadium(await fetchDoc('/stadium/'));
+    setSlice('stadium', before);
+    const { pick, why, building } = pickFacilityUpgrade(before);
+    const busy = building && building.length ? ` (building: ${building.join(', ')})` : '';
+    if (!pick) return { ok: true, text: (why || 'nothing required right now') + busy };
+    const what = `${pick.title} → level ${pick.nextLevel} for ${fmtMoney(pick.cost)}`;
+    if (dryRun) return { ok: true, text: 'would build ' + what };
+    const res = JSON.parse(await tmPost('/ajax/stadium_change.ajax.php', { facility: pick.key, session_id: SESSION.id, level: pick.nextLevel }));
+    if (!res || !res.success) return { ok: false, text: `${what} refused: ${res && res.error ? res.error : 'no reply'}` };
+    const after = parseStadium(await fetchDoc('/stadium/'));
+    setSlice('stadium', after);
+    const f = after.facilityData && after.facilityData[pick.key];
+    const verified = !!f && (f.building || f.level >= pick.nextLevel);
+    return { ok: verified, text: (verified ? 'started ' : 'sent but not confirmed: ') + what };
+  }
+
+  /* ============================================================
+   *  SECTION 5L — MARKET SCAN
+   *  ------------------------------------------------------------
+   *  Searches the transfer list itself via the page's own search
+   *  (transfer.ajax.php; filter string = the page's URL-hash format) instead
+   *  of waiting for you to browse. A reply holds ≤100 listings WITH full
+   *  skills, ASI, age, bid — so it runs as narrow searches (position group ×
+   *  age band). Listings start at 18, and without /for/ only home-nation
+   *  players come back (1 v 100+ defenders, live). Routine is the one missing
+   *  input: fetched per player for the shortlist tops, then re-ranked.
+   *  Read-only: it never bids.
+   * ============================================================ */
+  const MARKET_GROUPS = ['gk', 'de', 'dm', 'mf', 'om', 'fw'];
+  const MARKET_BANDS = [[18, 20], [21, 24], [25, 27]];
+  const MARKET_ROUTINE_FETCH = 40;
+  const MARKET_STALE_MS = 3 * 864e5; // listings run for days; older sightings are gone
+  // TM writes ages as years.months: 18.11 = 18 years 11 months, 29.1 = 29 years 10 months.
+  const ageMonthsFromTm = a => { const n = Number(a); if (!n) return null; const y = Math.floor(n); return y * 12 + Math.round((n - y) * 100); };
+  function marketRow(x) {
+    const skills = {};
+    ['str', 'sta', 'pac', 'mar', 'tac', 'wor', 'pos', 'pas', 'cro', 'tec', 'hea', 'fin', 'lon', 'set', 'han', 'one', 'ref', 'ari', 'jum', 'com', 'kic', 'thr']
+      .forEach(k => { if (x[k] != null && x[k] !== '') skills[k] = Number(x[k]); });
+    const ageMonths = ageMonthsFromTm(x.age);
+    return {
+      id: String(x.id), name: x.name, fp: displayFp(x.fp_format || ''), age: ageMonths ? ageMonths / 12 : null, ageMonths,
+      asi: Number(x.asi) || null, routine: x.routine != null ? Number(x.routine) : null, bid: x.bid != null ? String(x.bid) : null,
+      time: x.time, nat: x.nat || null, rec: Number(x.rec) / 2 || null, skills, _seen: now(), _scan: true,
+    };
+  }
+  async function marketScan(onProgress) {
+    const prefs = loadShortlistPrefs('senior');
+    const foreign = prefs.includeForeign !== false ? 'for/' : '';
+    const searches = [];
+    MARKET_GROUPS.forEach(g => MARKET_BANDS.forEach(([a, b]) => searches.push(`/${g}/${foreign}amin/${a}/amax/${b}/`)));
+    const c = loadCache();
+    const store = (c.transferSeen && c.transferSeen.data) || {};
+    Object.keys(store).forEach(id => { if (!store[id]._seen || now() - store[id]._seen > MARKET_STALE_MS) delete store[id]; });
+    let listings = 0, done = 0;
+    for (const h of searches) {
+      onProgress && onProgress(`Searching the market ${++done}/${searches.length}…`);
+      try {
+        const d = JSON.parse(await tmPost('/ajax/transfer.ajax.php', { search: h, club_id: SESSION.id }));
+        const list = d && d.list ? (Array.isArray(d.list) ? d.list : Object.values(d.list)) : [];
+        list.forEach(x => { if (x && x.id) { const r = marketRow(x); const prev = store[r.id]; store[r.id] = { ...prev, ...r, routine: r.routine != null ? r.routine : (prev ? prev.routine : null), wage: prev && prev.wage }; listings++; } });
+      } catch (e) { console.warn('TM Advisor: market search failed', h, e); }
+      await sleep(150);
+    }
+    setSlice('transferSeen', store);
+    // Routine is worth up to ~15 R5 points, and the listing omits it — so rank once without it,
+    // fetch it for the tops, then rank again.
+    let senior = buildSeniorShortlist(prefs).ranked, youth = buildYouthShortlist().ranked;
+    const need = senior.slice(0, MARKET_ROUTINE_FETCH).concat(youth.slice(0, 15)).filter(p => store[p.id] && store[p.id].routine == null).map(p => p.id);
+    let fetched = 0;
+    for (const id of need) {
+      onProgress && onProgress(`Checking routine & wage ${++fetched}/${need.length}…`);
+      try {
+        const t = normaliseTooltipPlayer(await fetchPlayerTooltip(id));
+        if (t) { store[id].routine = t.routine; store[id].wage = t.wage; delete store[id]._r5; }
+      } catch (e) { console.warn('TM Advisor: routine fetch failed', id, e); }
+      await sleep(120);
+    }
+    setSlice('transferSeen', store);
+    senior = buildSeniorShortlist(prefs).ranked; youth = buildYouthShortlist().ranked;
+    const summary = { t: now(), searches: searches.length, listings, unique: Object.keys(store).length, seniors: senior.filter(p => p._xi).length, youth: youth.length, foreign: !!foreign };
+    setSlice('marketScan', summary);
+    return summary;
+  }
+
+  /* ============================================================
    *  SECTION 6 — STADIUM ENGINE
    * ============================================================ */
 
@@ -3412,6 +3614,41 @@
       return pa - pb;
     });
     return results;
+  }
+
+  // Inputs analyseStadium needs — one place, shared by the Stadium tab and the copilot's facility
+  // step, so "pays back" means the same thing in both.
+  function stadiumContext(stadiumData) {
+    const financesSlice = getSlice('finances'), homeSlice = getSlice('home'), maintenanceSlice = getSlice('maintenance');
+    const stadiumSlice = { data: stadiumData || {} };
+    // Cash source priority: Finances balance (confirmed reliable — regex matches "Current
+    // Balance:" text directly) > Home page inline var > Stadium page inline var. The inline
+    // SESSION["cash"]/manager_cash regexes are best-effort since the exact JS var name can
+    // change; Finances is the one place we're always sure of the number.
+    let cash = null;
+    if (financesSlice && financesSlice.data.balance != null) cash = financesSlice.data.balance;
+    else if (homeSlice && homeSlice.data.cash != null) cash = homeSlice.data.cash;
+    else if (stadiumSlice.data.cash != null) cash = stadiumSlice.data.cash;
+    const fd = stadiumSlice.data.facilityData;
+    const stadiumSeats = fd && fd.stadium ? fd.stadium.level : null;
+    const attendanceRef = stadiumSeats ? Math.round(stadiumSeats * 0.65) : 15000; // rough fill-rate assumption
+
+    // Weekly income/maintenance for the sustainability check. Maintenance now prefers the
+    // dedicated Maintenance page's own "Total" row (exact, per-facility-summed figure) over
+    // the Finances tab's weekly aggregate, falling back to the latter if that page hasn't
+    // been visited/fetched yet.
+    let financials = null;
+    if (financesSlice && financesSlice.data.weekly) {
+      const w = financesSlice.data.weekly;
+      const get = (label, idx) => w[label] ? parseMoney(w[label][idx || 0]) : 0;
+      const weeklyIncome = get('Attendance') + get('TV Money') + get('Sponsors') + get('Merchandise') + get('Food');
+      let weeklyMaintenance = Math.abs(get('Maintenance'));
+      if (maintenanceSlice && maintenanceSlice.data.totals && maintenanceSlice.data.totals['Total']) {
+        weeklyMaintenance = maintenanceSlice.data.totals['Total'].week;
+      }
+      financials = { weeklyIncome, weeklyMaintenance };
+    }
+    return { cash, fd, stadiumSeats, attendanceRef, financials };
   }
 
   /* ============================================================
@@ -3832,29 +4069,39 @@
   }
 
   function autopilotCardHtml() {
-    const ap = autopilotPrefs();
-    const entries = ((getSlice('autopilotLog') || { data: [] }).data || []).slice(0, 5);
-    const toggle = (id, on, text) => `<label class="tma-mini" style="display:flex;gap:6px;align-items:center;margin:4px 0;cursor:pointer;color:var(--tma-text);"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}> ${text}</label>`;
+    const ap = autopilotPrefs(), st = copilotSteps();
+    const entries = ((getSlice('autopilotLog') || { data: [] }).data || []).slice(0, 3);
+    const toggle = (id, on, text) => `<label class="tma-mini" style="display:flex;gap:6px;align-items:flex-start;margin:4px 0;cursor:pointer;color:var(--tma-text);"><input type="checkbox" id="${id}" ${on ? 'checked' : ''} style="margin-top:2px;"> <span>${text}</span></label>`;
+    const entryHtml = e => `<div style="margin-top:8px;"><div class="tma-row"><span style="color:${e.ok ? 'var(--tma-lime)' : 'var(--tma-amber)'};font-weight:600;">${e.ok ? '✔' : '⚠'} ${esc(e.msg)}</span><span class="tma-mini">${ago(e.t)}</span></div>${(e.lines || []).map(l => `<div class="tma-mini" style="padding:1px 0 1px 8px;">${esc(l)}</div>`).join('')}</div>`;
     return `
       <div class="tma-card">
-        <h4>Autopilot <span class="tma-badge">${ap.enabled ? (ap.dryRun ? 'dry run' : 'on') : 'off'}</span></h4>
-        ${toggle('tma-ap-on', ap.enabled, 'Apply the match plan before each match')}
-        ${toggle('tma-ap-dry', ap.dryRun, 'Dry run — log the plan, save nothing')}
-        <div class="tma-mini" style="margin:6px 0;">Runs when you open any TM page: once per match, at most every 20 min, never within an hour of kickoff, and only once the next opponent is scanned. Every save is read back; Undo is on the Tactics page.</div>
-        ${entries.map(e => `<div class="tma-row"><span style="color:${e.ok ? 'var(--tma-lime)' : 'var(--tma-amber)'};">${e.ok ? '✔' : '⚠'} ${esc(e.msg)}</span><span class="tma-mini">${ago(e.t)}</span></div>`).join('')}
-        <button class="tma-btn secondary" id="tma-ap-run">Run now</button>
+        <h4>Match copilot <span class="tma-badge">${ap.enabled ? (ap.dryRun ? 'autopilot · dry run' : 'autopilot on') : 'manual'}</span></h4>
+        <button class="tma-btn" id="tma-ap-run">⚡ Prepare match</button>
         <div class="tma-progress" id="tma-ap-status"></div>
+        <div class="tma-mini" style="margin:10px 0 2px;text-transform:uppercase;letter-spacing:.04em;">Steps</div>
+        ${toggle('tma-step-training', st.training, 'Training groups — each player in the drill that trains what his position needs')}
+        ${toggle('tma-step-tactics', st.tactics, 'Opponent scan → XI, bench, captain &amp; set pieces, mentality/style/focus, conditional orders')}
+        ${toggle('tma-step-facilities', st.facilities, 'Facility upgrades <b>(spends cash)</b> — training/youth first, else income that pays back within 26 weeks; one per run, never into the wage reserve')}
+        <div class="tma-mini" style="margin:10px 0 2px;text-transform:uppercase;letter-spacing:.04em;">Automation</div>
+        ${toggle('tma-ap-on', ap.enabled, 'Run by itself before each match (whenever you open a TM page) — once per match, never inside the tactics lock')}
+        ${toggle('tma-ap-dry', ap.dryRun, 'Dry run — plan and log, save nothing')}
+        ${entries.map(entryHtml).join('')}
       </div>`;
   }
   function bindAutopilotCard() {
-    const flip = (id, key) => { const el = document.getElementById(id); if (el) el.addEventListener('change', () => { setAutopilotPrefs({ ...autopilotPrefs(), [key]: el.checked }); renderDashboard(); }); };
-    flip('tma-ap-on', 'enabled');
-    flip('tma-ap-dry', 'dryRun');
+    const flip = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('change', () => { if (fn(el.checked) === false) el.checked = !el.checked; renderDashboard(); }); };
+    flip('tma-ap-on', v => setAutopilotPrefs({ ...autopilotPrefs(), enabled: v }));
+    flip('tma-ap-dry', v => setAutopilotPrefs({ ...autopilotPrefs(), dryRun: v }));
+    flip('tma-step-training', v => setCopilotSteps({ ...copilotSteps(), training: v }));
+    flip('tma-step-tactics', v => setCopilotSteps({ ...copilotSteps(), tactics: v }));
+    flip('tma-step-facilities', v => {
+      if (v && !window.confirm('Facility upgrades spend club cash and take weeks to build. Let the copilot start one when the rules say it is needed?')) return false;
+      setCopilotSteps({ ...copilotSteps(), facilities: v });
+    });
     bindBtn('tma-ap-run', async () => {
       const st = document.getElementById('tma-ap-status'), btn = document.getElementById('tma-ap-run');
       btn.disabled = true;
-      st.textContent = 'Running — scanning the next opponent and planning…';
-      await runAutopilot(true);
+      await runCopilot(true, t => { st.textContent = t; });
       renderDashboard();
     });
   }
@@ -4101,33 +4348,7 @@
       body.innerHTML = `<div class="tma-card"><h4>No stadium data yet</h4></div>`;
       return;
     }
-    // Cash source priority: Finances balance (confirmed reliable — regex matches "Current
-    // Balance:" text directly) > Home page inline var > Stadium page inline var. The inline
-    // SESSION["cash"]/manager_cash regexes are best-effort since the exact JS var name can
-    // change; Finances is the one place we're always sure of the number.
-    let cash = null;
-    if (financesSlice && financesSlice.data.balance != null) cash = financesSlice.data.balance;
-    else if (homeSlice && homeSlice.data.cash != null) cash = homeSlice.data.cash;
-    else if (stadiumSlice.data.cash != null) cash = stadiumSlice.data.cash;
-    const fd = stadiumSlice.data.facilityData;
-    const stadiumSeats = fd && fd.stadium ? fd.stadium.level : null;
-    const attendanceRef = stadiumSeats ? Math.round(stadiumSeats * 0.65) : 15000; // rough fill-rate assumption
-
-    // Weekly income/maintenance for the sustainability check. Maintenance now prefers the
-    // dedicated Maintenance page's own "Total" row (exact, per-facility-summed figure) over
-    // the Finances tab's weekly aggregate, falling back to the latter if that page hasn't
-    // been visited/fetched yet.
-    let financials = null;
-    if (financesSlice && financesSlice.data.weekly) {
-      const w = financesSlice.data.weekly;
-      const get = (label, idx) => w[label] ? parseMoney(w[label][idx || 0]) : 0;
-      const weeklyIncome = get('Attendance') + get('TV Money') + get('Sponsors') + get('Merchandise') + get('Food');
-      let weeklyMaintenance = Math.abs(get('Maintenance'));
-      if (maintenanceSlice && maintenanceSlice.data.totals && maintenanceSlice.data.totals['Total']) {
-        weeklyMaintenance = maintenanceSlice.data.totals['Total'].week;
-      }
-      financials = { weeklyIncome, weeklyMaintenance };
-    }
+    const { cash, fd, stadiumSeats, attendanceRef, financials } = stadiumContext(stadiumSlice.data);
 
     // Fan-based seat target: user's own tip — capacity should be roughly 2.5x club fans.
     let seatTargetHtml = '';
@@ -4248,7 +4469,7 @@
       return `
       ${ageRow}
       <div class="tma-row"><span>Max cost</span><input type="number" id="tma-${which}-maxcost" placeholder="${auto ? fmtMoney(auto) : 'no limit'}" min="0" step="100000" value="${prefs.maxCost != null ? prefs.maxCost : ''}" style="width:130px;background:#161a1f;border:1px solid #2b323b80;color:#e6e9ec;border-radius:5px;padding:4px 7px;text-align:right;"></div>
-      <label class="tma-row" style="cursor:pointer;"><span>Include foreign players</span><input type="checkbox" id="tma-${which}-foreign" ${prefs.includeForeign ? 'checked' : ''}></label>
+      <label class="tma-row" style="cursor:pointer;"><span>Include foreign players</span><input type="checkbox" id="tma-${which}-foreign" ${prefs.includeForeign !== false ? 'checked' : ''}></label>
     `;
     };
     const readPrefsFromInputs = (which) => {
@@ -4264,7 +4485,7 @@
       return prefs;
     };
 
-    const shortlistHtml = (shortlist && shortlist.length) ? shortlist.map(p => `
+    const shortlistHtml = (shortlist && shortlist.length) ? shortlist.slice(0, 12).map(p => `
       <div class="tma-card">
         <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${esc(p.name)} ↗</a>${badge(p)}${natBadge(p)}</h4>
         <div class="tma-row"><span>Age</span><span class="tma-goodval">${p.age != null ? p.age : '?'}</span></div>
@@ -4284,7 +4505,7 @@
     const seniorList = seniorSlice ? seniorSlice.data : null;
     const weakestMap = ownWeakestByBucket();
     const weakestRowsHtml = weakestMap ? Object.entries(weakestMap).map(([b, v]) => `<div class="tma-row"><span>${b}</span><span>${v.toFixed(1)}</span></div>`).join('') : '';
-    const seniorHtml = (seniorList && seniorList.length) ? seniorList.map(p => `
+    const seniorHtml = (seniorList && seniorList.length) ? seniorList.slice(0, 12).map(p => `
       <div class="tma-card">
         <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${esc(p.name)} ↗</a>${tierBadge(p)}${natBadge(p)}</h4>
         <div class="tma-row"><span>Age</span><span>${p.age != null ? p.age : '?'}</span></div>
@@ -4326,9 +4547,21 @@
       }).join('');
     })() : '<div class="tma-mini">No scout reports cached yet.</div>';
 
-    body.innerHTML = `
+    const ms = getSlice('marketScan');
+    const scanHtml = `
       <div class="tma-card">
-        <h4>Senior Transfer Targets</h4>
+        <h4>Market scan <span class="tma-badge">${ms ? ago(ms.t) : 'not run yet'}</span></h4>
+        <div class="tma-mini" style="margin-bottom:6px;">Searches the whole transfer list for you — every position, ages 18–27${ms && ms.data && !ms.data.foreign ? ', home nation only' : ', foreign players included'} — then ranks who'd improve your best XI (seniors) and who's developing fastest (youth). It never bids.</div>
+        ${ms && ms.data ? `<div class="tma-row"><span>Last scan</span><span>${ms.data.unique} listings · <b>${ms.data.seniors}</b> would start for you · <b>${ms.data.youth}</b> youth</span></div>` : ''}
+        <label class="tma-mini" style="display:flex;gap:6px;align-items:center;margin:6px 0;cursor:pointer;color:var(--tma-text);"><input type="checkbox" id="tma-market-foreign" ${loadShortlistPrefs('senior').includeForeign !== false ? 'checked' : ''}> Include foreign players (the home market alone is tiny — 1 defender v 100+ in a live test)</label>
+        <button class="tma-btn" id="tma-market-scan">🔎 Scan the transfer market</button>
+        <div class="tma-progress" id="tma-market-status"></div>
+      </div>`;
+
+    body.innerHTML = `
+      ${scanHtml}
+      <div class="tma-card">
+        <h4>Top senior targets <span class="tma-mini">(by gain to your best XI)</span></h4>
         ${weakestMap ? weakestRowsHtml : `<div class="tma-mini">Squad not cached yet.</div>`}
         ${prefsControlsHtml('senior', seniorPrefs)}
         <button class="tma-btn secondary" id="tma-senior-fetchstats">📡 Fetch stats (R5 · Rou · SI)</button>
@@ -4409,6 +4642,17 @@
       renderScouting();
     });
 
+    const foreignBox = document.getElementById('tma-market-foreign');
+    if (foreignBox) foreignBox.addEventListener('change', () => {
+      ['senior', 'youth'].forEach(w => saveShortlistPrefs(w, { ...loadShortlistPrefs(w), includeForeign: foreignBox.checked }));
+      renderScouting();
+    });
+    bind('tma-market-scan', async () => {
+      const st = document.getElementById('tma-market-status'), btn = document.getElementById('tma-market-scan');
+      btn.disabled = true;
+      try { await marketScan(t => { st.textContent = t; }); } catch (e) { st.textContent = 'Scan failed: ' + e.message; btn.disabled = false; return; }
+      renderScouting();
+    });
     bind('tma-senior-build', () => {
       const status = document.getElementById('tma-senior-status');
       const prefs = readPrefsFromInputs('senior');
@@ -4467,7 +4711,7 @@
     if (location.pathname.startsWith('/tactics')) verifyPendingApply();
     // Top window only (not TM's iframes), after the page has settled.
     if (window.top === window) {
-      setTimeout(() => { runAutopilot().catch(e => console.warn('TM Advisor: autopilot', e)); }, 4000);
+      setTimeout(() => { runCopilot().catch(e => console.warn('TM Advisor: copilot', e)); }, 4000);
       setTimeout(() => { backgroundCrawl(); }, 15000); // after the autopilot, never competing with it
     }
   }

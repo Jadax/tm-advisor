@@ -26,6 +26,19 @@ TM Advisor answers all of these — automatically, on every page — using only 
 
 ## Key Features
 
+### ⚡ Match Copilot
+
+One **Prepare match** button on the Dashboard does everything the next match needs — each step behind its own switch, every save read back from the game:
+
+| Step | What it does |
+|---|---|
+| Opponent scan | Their squad with real skills, the XI they've saved for this fixture, their last 5 matches' tactics |
+| Training groups | Puts each player in the drill that trains what his position needs — TM's own focus skills per group, weighed by the R5 formula (skills already at 20 are skipped) |
+| Tactics & orders | XI, bench, captain & set-piece takers, mentality/style/focus and all 5 conditional orders |
+| Facilities *(off until you enable it — spends cash)* | Training ground / youth academy first, else an income facility that pays back within 26 weeks; never one already building, one per run, never into your wage reserve |
+
+Switch on **autopilot** and the same run happens by itself once per match, whenever you open a TM page — never inside the tactics lock. A dry run shows exactly what it would change.
+
 ### 🧠 Tactics Engine
 
 - **Best XI picker** — rates every player in every slot with that slot's own R5 weights, applies TM's own out-of-position penalty (10% per step, read from the game's tactics code), and finds the optimal XI across 11 formations. Tells you when formations are a near-tie, so you know the shape barely matters and who plays where does.
@@ -52,7 +65,8 @@ Adds **Routine**, **Skill Index**, and **R5** columns directly to the game's own
 
 ### 🔍 Scouting & Transfers
 
-- **Youth Finder** — ranks youngsters you've seen on the transfer list by **development pace**: skill points gained per year since 16, read from their SI with the same formula the R5 engine uses — boosted when a scout report shows growth headroom. Flags any who'd already start for you.
+- **Market Scan** — one click searches the whole transfer list itself (every position, ages 18–27, foreign players included by default — the home market alone is tiny), checks routine for the top candidates, and ranks the **top seniors** and **top youth** below. Read-only: it never bids.
+- **Youth Finder** — ranks youngsters (18–20, the youngest the market lists) by **development pace**: skill points gained per year since 16, read from their SI with the same formula the R5 engine uses — boosted when a scout report shows growth headroom. Flags any who'd already start for you.
 - **Senior Targets** — every candidate is judged by what he does to **your best XI**: the script re-picks your optimal XI with him added and shows the gain, the slot he'd take and who he'd replace — so position, your depth there and TM's out-of-position penalty all count.
 - **Market-value verdict** — for every shortlisted player, compares the live bid against the game's Sell-to-Agent / Max Sell Price to flag it **Underpriced / Fair / Overpriced** at a glance.
 - **Bloom-phase estimate** — grades each scout report's youth by bloom phase (from age + potential headroom) so you know who to train hard before it ends.
@@ -142,8 +156,8 @@ The few tunable values live in `YOUTH_CRITERIA` near the top of the script:
 
 ```js
 const YOUTH_CRITERIA = {
-  maxAge: 18,             // Maximum age for the youth shortlist
-  minRoutine: 2,          // Minimum routine to qualify
+  maxAge: 20,             // Youth shortlist age cap (the market lists nobody under 18)
+  minRoutine: 0,          // Minimum routine (youths have played few matches, so ~0 is normal)
   minASI: 30,             // Minimum Skill Index
   minR5: 10,              // Minimum R5 rating
   highPotentialGrowth: 1.5, // potential ≥ this × current rec = "high potential" badge
@@ -166,8 +180,9 @@ No skills are invented. No ratings are guessed. Everything comes from what the g
 
 ## Data & Privacy
 
-- **Everything stays in your browser.** All data is stored in `localStorage` — nothing is sent to any external server.
-- **Only reads pages you visit.** The script never navigates away or fetches pages you haven't opened.
+- **Everything stays in your browser.** All data is stored in `localStorage` — nothing is sent anywhere except trophymanager.com itself.
+- **It does fetch TM pages in the background** — your next fixture, the opponent's squad and recent matches, your division's match reports (daily, capped), and transfer-list searches when you press Market Scan. Requests are sequential with short pauses, never in bursts.
+- **It only changes your club when you ask it to:** Apply / Undo on the Tactics page, Prepare match, or autopilot — and only the steps you've switched on. It never bids, buys or sells players.
 - **No tracking, no analytics, no cookies.**
 
 ---
