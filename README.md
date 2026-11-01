@@ -33,8 +33,11 @@ One **Prepare match** button on the Dashboard does everything the next match nee
 | Step | What it does |
 |---|---|
 | Opponent scan | Their squad with real skills, the XI they've saved for this fixture, their last 5 matches' tactics |
-| Training groups | Puts each player in the drill that trains what his position needs — TM's own focus skills per group, weighed by the R5 formula (skills already at 20 are skipped) |
+| Reserves | Youths (≤21) outside the first XI + bench go down for minutes and routine; promoted back when they'd start. The reserves get their own full plan for *their* next opponent — youths first, settings, conditional orders |
 | Tactics & orders | XI, bench, captain & set-piece takers, mentality/style/focus and all 5 conditional orders |
+| Custom training *(TM Pro)* | Starts from the community-standard role templates (DEF 2-3-2-2-3-0, MID 2-1-2-3-2-2, WING 2-1-3-2-2-2, FWD 2-0-2-2-3-3), then moves up to 2 dots per player toward his weakest key skills; groups that stalled for 3 weeks count half; fully developed players go 2-2-2-2-2-2. Without Pro it sets the standard drill groups instead |
+| Youth pull | On each weekly youth report: hire potential ≥17 where the squad needs that position, fire the rest — only when the report actually shows potential |
+| Scouting | Sends free scouts to your youths first; flags any scout with 20s in the key stats on the hire list (never hires) |
 | Facilities *(off until you enable it — spends cash)* | Training ground / youth academy first, else an income facility that pays back within 26 weeks; never one already building, one per run, never into your wage reserve |
 
 Switch on **autopilot** and the same run happens by itself once per match, whenever you open a TM page — never inside the tactics lock. A dry run shows exactly what it would change.

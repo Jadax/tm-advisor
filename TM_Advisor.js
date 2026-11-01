@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.14.0
+// @version      3.15.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -57,6 +57,10 @@
  *   SECTION 5J TRAINING GROUPS       (each player in the drill his position needs)
  *   SECTION 5K FACILITY UPGRADES     (copilot step, off by default, rule-based)
  *   SECTION 5L MARKET SCAN           (searches the transfer list itself; never bids)
+ *   SECTION 5M CUSTOM TRAINING       (TM Pro: role templates + per-player tweaks)
+ *   SECTION 5N RESERVE TEAM          (demote ≤21 non-squad youths, promote, reserve XI)
+ *   SECTION 5O YOUTH PULLS           (hire ≥17 potential where needed; acts only on real potential)
+ *   SECTION 5P SCOUTING              (free scouts → own youths; watches for 20-rated scouts)
  *   SECTION 6  STADIUM ENGINE        (upgrade ROI ranking)
  *   SECTION 7  UI                    (styles, panel; ONE context-relevant
  *                                       tab per page)
@@ -148,26 +152,34 @@
    *  per day (later same-day parses overwrite that day's entry so
    *  the store stays compact). Capped to the most recent 60 days.
    * ---------------------------------------------------------- */
-  const HISTORY_MAX_DAYS = 60;
-  const dayKey = (ts) => new Date(ts || now()).toISOString().slice(0, 10);
+  // Training runs once a week (Tuesday, TM guide) — one snapshot per training week, keyed by that
+  // week's Tuesday; later parses in the same week overwrite it, so the post-training state wins.
+  const HISTORY_MAX_WEEKS = 52;
+  function weekKey(ts) {
+    const d = new Date(ts || now());
+    d.setDate(d.getDate() - ((d.getDay() - 2 + 7) % 7));
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
 
   function recordSquadSnapshot(players) {
     if (!players || !players.length) return;
     const c = loadCache();
     const hist = c.history && c.history.data ? c.history.data : {};
     // Compact per-player row: only what the trend view needs.
-    hist[dayKey()] = players.map(p => {
+    hist[weekKey()] = players.map(p => {
       ensureR5(p);
       return {
         id: p.id, name: p.name,
         asi: p.asi != null ? Number(p.asi) : null,
         routine: p.routine != null ? Number(p.routine) : null,
         r5: (p._r5 != null && !isNaN(p._r5)) ? Number(Number(p._r5).toFixed(1)) : null,
+        ti: p.ti != null ? p.ti : null,
+        // Skills too, so custom training can see which dot groups actually produce gains (5M).
+        sk: p.skills ? Object.fromEntries(Object.entries(p.skills).filter(([, v]) => v != null && v !== '').map(([k, v]) => [k, Number(v) || 0])) : null,
       };
     });
-    // Prune to the most recent HISTORY_MAX_DAYS days.
-    const days = Object.keys(hist).sort();
-    while (days.length > HISTORY_MAX_DAYS) delete hist[days.shift()];
+    const weeks = Object.keys(hist).sort();
+    while (weeks.length > HISTORY_MAX_WEEKS) delete hist[weeks.shift()];
     c.history = { t: now(), data: hist };
     saveCache(c);
   }
@@ -366,6 +378,7 @@
       id: p.id, no: p.no, name: p.name, fp: p.fp, age: parseTmAge(p.age),
       asi: p.asi, rec: parseFloat(p.rec) || 0, rat: parseFloat(p.rat) || 0,
       routine: p.routine !== undefined ? parseFloat(p.routine) : null, // needed for accurate R5
+      ti: p.ti != null && p.ti !== '' ? Number(p.ti) : null, // this week's training intensity (plot = its weekly history)
       gp: p.gp, goals: p.goals, assists: p.assists, ban: p.ban, inj: p.inj,
       wage: parseInt(p.wage, 10) || 0,
       plot: Array.isArray(p.plot) ? p.plot.map(Number) : [], // training-intensity history, oldest→newest
@@ -1100,6 +1113,7 @@
         const doc = await fetchDoc(src.url);
         const data = src.parser(doc);
         setSlice(src.key, data);
+        if (src.key === 'players') recordSquadSnapshot(data); // daily skill/TI history without a page visit
         onProgress && onProgress(src.key, 'done');
       } catch (e) {
         console.error('TM Advisor refresh failed for', src.key, e);
@@ -2027,9 +2041,9 @@
   }
 
   const NO_FIT = -1e6;
-  function pickBestXI(players, formationKey) {
+  function pickBestXI(players, formationKey, boost) {
     const keys = FORMATIONS[formationKey].split(' ');
-    const score = keys.map(k => players.map(p => { const v = slotRating(p, k); return isFinite(v) ? v : NO_FIT; }));
+    const score = keys.map(k => players.map(p => { const v = slotRating(p, k) * (boost ? boost(p) : 1); return isFinite(v) ? v : NO_FIT; }));
     while (score[0].length < keys.length) score.forEach(r => r.push(NO_FIT)); // fewer players than slots
     const pick = assignOptimal(score);
     const lineup = keys.map((k, i) => {
@@ -2043,9 +2057,9 @@
   // Pure strength pick across every formation. No meta bias or counter nudge: on a real squad
   // the top formations land within ~1% of each other, so a guessed +3-4% bonus silently
   // decided the formation. `alternatives` lists the shapes within 1% — a genuine coin flip.
-  function bestFormation(players) {
+  function bestFormation(players, boost) {
     players.forEach(ensureR5);
-    const all = Object.keys(FORMATIONS).map(key => pickBestXI(players, key)).sort((a, b) => b.totalRec - a.totalRec);
+    const all = Object.keys(FORMATIONS).map(key => pickBestXI(players, key, boost)).sort((a, b) => b.totalRec - a.totalRec);
     const best = all[0];
     best.alternatives = all.slice(1).filter(r => r.totalRec >= best.totalRec * 0.99).map(r => r.formation);
     return best;
@@ -2120,7 +2134,7 @@
     return { source: 'best', lineup: best.lineup.filter(l => l.player) };
   }
 
-  function recommendTacticSettings(myXI, opponent, scouting, expected) {
+  function recommendTacticSettings(myXI, opponent, scouting, expected, opts) {
     // Compare our starting XI's average R5 against the opponent's likely-best-XI average R5.
     // Both sides are now on the same R5 scale (real skills when available via the AJAX
     // endpoint, or a rough star*22 estimate as fallback) — see fetchOpponentSquadReal().
@@ -2217,8 +2231,11 @@
       // Without both opposing flanks known, compare our own flanks. (The old fallback subtracted
       // each side's own average from itself, so with no opponent data focus was always Balanced.)
       const oppKnown = oppLeftDef != null && oppRightDef != null;
-      const netLeft = (leftAvg ?? 0) - (oppKnown ? oppRightDef : 0);   // our left attack vs their right defence
-      const netRight = (rightAvg ?? 0) - (oppKnown ? oppLeftDef : 0);  // our right attack vs their left defence
+      // Their flank counts half: focus only steers 25% of assist chances to that side (developer
+      // quote, /forum/int/general/476927/) and a winger meets his nearest defenders only ~50% of
+      // the time (same thread) — so OUR quality on a side matters more than theirs.
+      const netLeft = (leftAvg ?? 0) - (oppKnown ? oppRightDef * 0.5 : 0);   // our left attack vs their right defence
+      const netRight = (rightAvg ?? 0) - (oppKnown ? oppLeftDef * 0.5 : 0);  // our right attack vs their left defence
       const gap = netLeft - netRight;
       if (Math.abs(gap) > 8) focus = gap > 0 ? 2 : 4; else focus = 1;
       const oppNote = (oppLeftDef != null && oppRightDef != null)
@@ -2242,9 +2259,10 @@
       oppAvg
     );
     // Evidence from the division's own results (Section 5I) may replace the heuristic picks.
-    const model = fitResultModel();
+    // The reserves play another league: the first team's division model doesn't apply to them.
+    const model = opts && opts.noEvidence ? { ready: false, n: 0 } : fitResultModel();
     const nmNext = getSlice('home') && getSlice('home').data && getSlice('home').data.nextMatch;
-    const weAreHome = !!(nmNext && nmNext.home && String(nmNext.home.id) === clubId);
+    const weAreHome = opts && opts.weAreHome != null ? opts.weAreHome : !!(nmNext && nmNext.home && String(nmNext.home.id) === clubId);
     const savedXI = expected && Array.isArray(expected.xi) && expected.xi.filter(x => x.rec).length >= 9 ? expected.xi : null; // their real XI's rec/routine, straight from the match page
     const oppPlayers = savedXI || (oppXI ? oppXI.lineup.map(l => l.player) : []);
     const predictedGD = predictGoalDiff(model, myXI.lineup.filter(l => l.player).map(l => l.player), oppPlayers, weAreHome);
@@ -2297,8 +2315,8 @@
   // carry that flag) — a per-match call: today's points vs a ban for the next fixture.
   function buildMatchPlan(squad, opponent, scouting, expected, opts) {
     const players = squad.filter(p => (!p.ban || p.ban === '0') && !p.inj && !(opts && opts.restBanRisk && p.banRisk));
-    const best = bestFormation(players);
-    const settings = recommendTacticSettings(best, opponent, scouting, expected);
+    const best = bestFormation(players, opts && opts.boost);
+    const settings = recommendTacticSettings(best, opponent, scouting, expected, opts);
     const starters = best.lineup.filter(l => l.player).map(l => l.player);
     const ids = new Set(starters.map(p => p.id));
     const bench = pickBench(players.filter(p => !ids.has(p.id)));
@@ -2922,10 +2940,11 @@
     passing: 'pas', crossing: 'cro', technique: 'tec', heading: 'hea', finishing: 'fin', longshots: 'lon', set_pieces: 'set',
     handling: 'han', one_on_ones: 'one', reflexes: 'ref', aerial_ability: 'ari', jumping: 'jum', communication: 'com', kicking: 'kic', throwing: 'thr',
   };
-  function tacticsPageSquad() {
-    if (!tacticsPageData) return null;
+  function tacticsPageSquad() { return tacticsPageData ? squadFromTacticsData(tacticsPageData) : null; }
+  function squadFromTacticsData(data) {
+    if (!data || !data.players) return [];
     const star = v => typeof v === 'number' ? v : Number((String(v).match(/alt='(\d+)'/) || [])[1] || v); // star skills are <img alt='19|20'>
-    return Object.values(tacticsPageData.players).map(p => {
+    return Object.values(data.players).map(p => {
       const skills = {};
       (p.skills || []).forEach(s => { if (TP_SKILL[s.key]) skills[TP_SKILL[s.key]] = star(s.value); });
       return {
@@ -2937,12 +2956,15 @@
     });
   }
 
-  function planToTactic(plan) {
+  function lineupOnField(best, bench, roles) {
     const onField = Object.fromEntries(TACTIC_KEYS.map(k => [k, '0']));
-    plan.best.lineup.forEach(l => { if (l.player) onField[l.slot] = String(l.player.id); });
-    plan.bench.named.forEach(b => { if (b.player) onField[b.key] = String(b.player.id); });
-    const r = plan.roles;
-    [['captain', r.captain], ['corner', r.corner], ['penalty', r.penalty], ['freekick', r.freeKick]].forEach(([k, p]) => { if (p) onField[k] = String(p.id); });
+    best.lineup.forEach(l => { if (l.player) onField[l.slot] = String(l.player.id); });
+    bench.named.forEach(b => { if (b.player) onField[b.key] = String(b.player.id); });
+    [['captain', roles.captain], ['corner', roles.corner], ['penalty', roles.penalty], ['freekick', roles.freeKick]].forEach(([k, p]) => { if (p) onField[k] = String(p.id); });
+    return onField;
+  }
+  function planToTactic(plan) {
+    const onField = lineupOnField(plan.best, plan.bench, plan.roles);
     const orders = plan.condOrders.map(o => ({
       EVENT_ID: String(o.eventId), EVENT_PAR: String(o.eventPar), COND_ID: String(o.condId), COND_PAR: String(o.condPar),
       ORDER_ID: String(o.orderId), ORDER_PAR1: String(o.par1), ORDER_PAR2: String(o.par2 != null ? o.par2 : 0), ORDER_PAR3: o.par3 != null ? String(o.par3) : null,
@@ -2955,42 +2977,45 @@
   // Main team = 0/0/0. Off /tactics/ these page vars don't exist (and `window.national` could
   // even resolve to a DOM element by id), so only plain digits are trusted.
   const pageNum = v => /^\d+$/.test(String(v)) && typeof v !== 'object' ? String(v) : '0';
-  const tmBase = () => ({ reserves: pageNum(window.reserves), national: pageNum(window.national), miniGameId: pageNum(window.miniGameId) });
+  // res = 1 targets the reserve team (TM's own `reserves` flag on every tactics endpoint).
+  const tmBase = (res) => ({ reserves: res != null ? (res ? '1' : '0') : pageNum(window.reserves), national: pageNum(window.national), miniGameId: pageNum(window.miniGameId) });
 
   // Saved orders come from the endpoint, not the page global, which can lag behind a save.
-  async function fetchCondOrders() {
-    const txt = await tmPost('/ajax/tactics_co_get.ajax.php', { get: 'cond_orders', ...tmBase() });
+  async function fetchCondOrders(res) {
+    const txt = await tmPost('/ajax/tactics_co_get.ajax.php', { get: 'cond_orders', ...tmBase(res) });
     try { return JSON.parse(txt) || []; } catch (e) { return window.cond_orders || []; }
   }
   // Reads the SERVER's copy from any page: positions via tactics_get, the three settings from
   // a fetched /tactics/ (its <option selected> is the saved value), orders via tactics_co_get.
-  async function readSavedTactic() {
-    const assoc = (await loadTacticsPage()).formation_assoc || {};
-    const doc = await fetchDoc('/tactics/');
+  async function readSavedTactic(res) {
+    const data = res ? JSON.parse(await tmPost('/ajax/tactics_get.ajax.php', tmBase(1))) : await loadTacticsPage();
+    const assoc = data.formation_assoc || {};
+    const doc = await fetchDoc(res ? '/tactics/reserves/' : '/tactics/'); // reserves page: var reserves = 1 (live)
     const sel = id => { const o = doc.querySelector('#' + id + ' option[selected]'); return o ? String(o.value) : '0'; };
     return {
       onField: Object.fromEntries(TACTIC_KEYS.map(k => [k, String(assoc[k] || '0')])),
       mentality: sel('mentality_select'), style: sel('attacking_select'), focus: sel('focus_side_select'),
-      orders: (await fetchCondOrders()).slice(0, 5),
+      orders: (await fetchCondOrders(res)).slice(0, 5),
     };
   }
 
-  async function writeTactic(state, current) {
+  async function writeTactic(state, current, res) {
     const placed = new Set(POSITION_KEYS.map(k => state.onField[k]).filter(v => v !== '0'));
     const moves = {};
     POSITION_KEYS.forEach(k => { if (state.onField[k] !== '0') moves[state.onField[k]] = k; });
     POSITION_KEYS.forEach(k => { const old = current.onField[k]; if (old !== '0' && !placed.has(old)) moves[old] = 'out'; });
     // One post carries XI + bench + roles: the server takes the roles from `on_field`.
-    await tmPost('/ajax/tactics_post.ajax.php', { on_field: state.onField, players: moves, ...tmBase() });
+    await tmPost('/ajax/tactics_post.ajax.php', { on_field: state.onField, players: moves, ...tmBase(res) });
+    if (state.mentality == null) return; // positions-only save (reserve line-up)
     for (const [save, value] of [['mentality', state.mentality], ['attacking', state.style], ['focus', state.focus]]) {
       await sleep(150);
-      await tmPost('/ajax/tactics_post.ajax.php', { save, value, club_id: SESSION.id, ...tmBase() });
+      await tmPost('/ajax/tactics_post.ajax.php', { save, value, club_id: SESSION.id, ...tmBase(res) });
     }
     for (let i = 0; i < state.orders.length; i++) {
       await sleep(150);
       // Keep the slot's existing record (its ID) so TM updates it in place.
       const slot = current.orders[i] || { TEAM_ID: String(SESSION.id), COND_ORDER_NUM: String(i) };
-      await tmPost('/ajax/tactics_co_post.ajax.php', { ...slot, ...state.orders[i], ...tmBase() });
+      await tmPost('/ajax/tactics_co_post.ajax.php', { ...slot, ...state.orders[i], ...tmBase(res) });
     }
   }
 
@@ -3121,7 +3146,7 @@
   function copilotSteps() {
     let st = {};
     try { st = JSON.parse(localStorage.getItem(COPILOT_STEPS_KEY)) || {}; } catch (e) {}
-    return { training: st.training !== false, tactics: st.tactics !== false, facilities: st.facilities === true };
+    return { training: st.training !== false, tactics: st.tactics !== false, reserves: st.reserves !== false, youth: st.youth !== false, scouting: st.scouting !== false, facilities: st.facilities === true };
   }
   function setCopilotSteps(st) {
     try { localStorage.setItem(COPILOT_STEPS_KEY, JSON.stringify(st)); } catch (e) {}
@@ -3182,8 +3207,12 @@
       if (!force && state.doneMatchId === matchId) return null; // once per match: later manual edits stand
       const vs = nm.home && String(nm.home.id) === clubId ? nm.away.name : nm.home.name;
       await step('Opponent scan', async () => { await refreshAll(); const r = opponentReadiness(); return { ok: r.ready, text: r.text }; });
-      if (steps.training) await step('Training groups', () => applyTrainingGroups(dry));
+      // Reserves first: a promotion changes who the first-team plan can pick.
+      if (steps.reserves) await step('Reserves', () => manageReserves(dry));
       if (steps.tactics) await step('Tactics & orders', () => applyMatchPlanStep(nm, dry));
+      if (steps.training) await step('Training', () => trainingStep(dry));
+      if (steps.youth) await step('Youth pull', () => handleYouthPull(dry));
+      if (steps.scouting) await step('Scouting', () => scoutingStep(dry));
       if (steps.facilities) await step('Facilities', () => applyFacilityUpgrade(dry));
       if (allOk) setSlice('autopilot', { ...getSlice('autopilot').data, doneMatchId: matchId });
       return autopilotLog(`${dry ? 'Dry run' : force ? 'Prepared' : 'Autopilot'} v ${vs}`, allOk, { matchId, lines });
@@ -3527,6 +3556,374 @@
     const summary = { t: now(), searches: searches.length, listings, unique: Object.keys(store).length, seniors: senior.filter(p => p._xi).length, youth: youth.length, foreign: !!foreign };
     setSlice('marketScan', summary);
     return summary;
+  }
+
+  /* ============================================================
+   *  SECTION 5M — CUSTOM TRAINING  (TM Pro)
+   *  ------------------------------------------------------------
+   *  Per player, 12 dots over 6 custom groups (max 4 each). Starts from the
+   *  user's role templates — identical to the "basic training regimes" in
+   *  Sunshine United's forum guide "Tm's Best Youngsters & how to train them"
+   *  (/forum/int/general/414096/, post #3) — then tweaks per player:
+   *   • up to 2 dots move from the group with the least remaining need to
+   *     the one with the most, need = the user's key skills (primary ×2,
+   *     secondary ×1) × points left to 20; a group stalled for 3+ weeks
+   *     counts half (likely peaked — guide post #2);
+   *   • fully developed players (28+, or TI ≤ 0 for 4 weeks from 22) go
+   *     2-2-2-2-2-2, the full 102/102 (guide: "if all three are peaked …
+   *     continue the training at max 102/102").
+   *  Goalkeepers are left alone (user: GK — nothing).
+   * ============================================================ */
+  // Group contents as TM sends them (players_get_info type:'training' → custom.teamN.skills).
+  const CUSTOM_GROUPS = [['str', 'wor', 'sta'], ['mar', 'tac'], ['cro', 'pac'], ['pas', 'tec', 'set'], ['hea', 'pos'], ['fin', 'lon']];
+  const CUSTOM_TEMPLATES = { DEF: [2, 3, 2, 2, 3, 0], MID: [2, 1, 2, 3, 2, 2], WING: [2, 1, 3, 2, 2, 2], FWD: [2, 0, 2, 2, 3, 3] };
+  const CUSTOM_BALANCED = [2, 2, 2, 2, 2, 2];
+  // The user's key skills per position: [primary, secondary].
+  const KEY_SKILLS = {
+    dlr: [['mar', 'tac'], ['str', 'sta', 'pac', 'wor', 'pos', 'pas', 'cro', 'tec', 'hea']],
+    dc: [['mar', 'tac'], ['str', 'sta', 'pac', 'pos', 'wor', 'hea']],
+    dmlr: [['mar', 'tac', 'pas', 'cro'], ['str', 'sta', 'pac', 'wor', 'pos', 'tec', 'hea']],
+    dmc: [['mar', 'tac', 'pas', 'tec'], ['str', 'sta', 'pac', 'wor', 'pos', 'hea']],
+    mc: [['pas', 'tec'], ['str', 'sta', 'pac', 'mar', 'tac', 'wor', 'pos', 'hea', 'fin']],
+    mlr: [['pas', 'cro', 'tec'], ['str', 'sta', 'pac', 'mar', 'tac', 'wor', 'pos', 'hea', 'fin']],
+    omc: [['pas', 'tec', 'hea', 'fin'], ['str', 'sta', 'pac', 'wor', 'pos', 'lon']],
+    omlr: [['pas', 'cro', 'tec', 'fin'], ['str', 'sta', 'pac', 'wor', 'pos', 'hea']],
+    f: [['hea', 'fin'], ['str', 'sta', 'pac', 'wor', 'pos', 'pas', 'tec', 'lon']],
+  };
+  const keySkillsFor = slot => slot === 'dl' || slot === 'dr' ? 'dlr' : slot.startsWith('dm') ? (slot === 'dml' || slot === 'dmr' ? 'dmlr' : 'dmc')
+    : slot.startsWith('dc') ? 'dc' : slot.startsWith('om') ? (slot === 'oml' || slot === 'omr' ? 'omlr' : 'omc')
+    : slot.startsWith('m') ? (slot === 'ml' || slot === 'mr' ? 'mlr' : 'mc') : 'f';
+  const ROLE_OF_KEY = { dlr: 'DEF', dc: 'DEF', dmlr: 'DEF', dmc: 'DEF', mc: 'MID', omc: 'MID', mlr: 'WING', omlr: 'WING', f: 'FWD' };
+  const CUSTOM_AGE_BALANCED = 28;   // own heuristic: TM decline starts at 29 (TM guide, basics/training)
+  const CUSTOM_STALL_DAYS = 21;
+
+  // Skill gain per custom group over the last CUSTOM_STALL_DAYS, from the daily history.
+  function groupGains(playerId) {
+    const h = getSlice('history');
+    if (!h || !h.data) return null;
+    const days = Object.keys(h.data).sort();
+    const latest = days.length && (h.data[days[days.length - 1]] || []).find(x => String(x.id) === String(playerId));
+    const cutoff = now() - CUSTOM_STALL_DAYS * 864e5;
+    const baseDay = [...days].reverse().find(d => new Date(d).getTime() <= cutoff);
+    const base = baseDay && (h.data[baseDay] || []).find(x => String(x.id) === String(playerId));
+    if (!latest || !base || !latest.sk || !base.sk) return null;
+    return CUSTOM_GROUPS.map(g => g.reduce((a, k) => a + ((latest.sk[k] || 0) - (base.sk[k] || 0)), 0));
+  }
+
+  function customPlan(p, slot, tiHistory) {
+    const key = keySkillsFor(slot), role = ROLE_OF_KEY[key];
+    const age = Number(p.age) || 0;
+    const recentTi = (tiHistory || []).slice(-4).map(Number).filter(v => !isNaN(v));
+    if (age >= CUSTOM_AGE_BALANCED) return { dots: [...CUSTOM_BALANCED], role, why: `age ${Math.floor(age)}: development is done — balanced 2-2-2-2-2-2 keeps TI at the full 102/102` };
+    if (age >= 22 && recentTi.length >= 4 && recentTi.every(v => v <= 0)) return { dots: [...CUSTOM_BALANCED], role, why: 'TI ≤ 0 for 4 weeks: looks fully peaked — balanced at 102/102 (guide)' };
+    const [prim, sec] = KEY_SKILLS[key];
+    const weight = k => prim.includes(k) ? 2 : sec.includes(k) ? 1 : 0;
+    const sk = k => Number(p.skills && p.skills[k]) || 0;
+    const gains = groupGains(p.id);
+    const dots = [...CUSTOM_TEMPLATES[role]];
+    const need = CUSTOM_GROUPS.map((g, i) => {
+      const n = g.reduce((a, k) => a + weight(k) * Math.max(0, 20 - sk(k)), 0);
+      return gains && dots[i] >= 3 && gains[i] <= 0 ? n / 2 : n; // trained hard, nothing gained: likely peaked
+    });
+    const moves = [];
+    for (let m = 0; m < 2; m++) {
+      const from = dots.map((d, i) => ({ i, r: d > 0 ? need[i] / d : Infinity })).filter(x => dots[x.i] > 0).sort((a, b) => a.r - b.r)[0];
+      const to = dots.map((d, i) => ({ i, r: d < 4 ? need[i] / (d + 1) : -1 })).sort((a, b) => b.r - a.r)[0];
+      if (!from || !to || from.i === to.i || to.r < from.r * 1.5) break; // only clearly better moves
+      dots[from.i]--; dots[to.i]++;
+      moves.push(`${CUSTOM_GROUPS[from.i].join('/')} → ${CUSTOM_GROUPS[to.i].join('/')}`);
+    }
+    return { dots, role, why: `${role} template${moves.length ? '; moved ' + moves.join(', ') : ''}` };
+  }
+
+  // Training slot per player: his slot in the first team's best XI, else his best natural slot.
+  function trainingSlots(squadA, extra) {
+    const players = squadA.map(p => ({ ...p }));
+    const xi = bestFormation(players.filter(p => (!p.ban || p.ban === '0') && !p.inj));
+    const slotOf = {};
+    xi.lineup.forEach(l => { if (l.player) slotOf[String(l.player.id)] = l.slot; });
+    const natural = p => parseFavPositionCodes(p.fp).map(c => c === 'f' ? 'fc' : c).filter(k => SLOT_NUM[k] != null)
+      .sort((a, b) => slotRating(p, b) - slotRating(p, a))[0] || 'mc';
+    return squadA.concat(extra || []).map(p => ({ p, slot: slotOf[String(p.id)] || natural(p) }));
+  }
+
+  async function readCustomTraining(playerId) {
+    const d = JSON.parse(await tmPost('/ajax/players_get_info.ajax.php', { player_id: playerId, type: 'training', show_non_pro_graphs: true }));
+    return d && d.custom ? d.custom : null;
+  }
+  // Same fields TM's own player page posts (mirrored by "TM Player Enhanced" 1.7.0).
+  function customPayload(playerId, cur, dots) {
+    const d = { type: 'custom', on: 1, player_id: playerId, 'custom[points_spend]': 0, 'custom[player_id]': playerId, 'custom[saved]': '' };
+    for (let i = 0; i < 6; i++) {
+      const t = cur.custom['team' + (i + 1)] || {};
+      const p = `custom[team${i + 1}]`;
+      d[`${p}[num]`] = i + 1; d[`${p}[label]`] = t.label || `Team ${i + 1}`; d[`${p}[points]`] = dots[i]; d[`${p}[skills][]`] = t.skills || [];
+    }
+    return d;
+  }
+
+  // SESSION.is_pro read false/0 on one page while the user has Pro (1111 days, live) — so a
+  // player already on custom training also counts as proof before falling back to groups.
+  async function trainingStep(dryRun) {
+    if (SESSION.is_pro || Number(SESSION.pro_days) > 0) return applyCustomTraining(dryRun);
+    await loadTacticsPage();
+    const first = tacticsPageSquad().find(p => bucketFor(p.fp) !== 'GK');
+    const cur = first ? await readCustomTraining(first.id) : null;
+    return cur && cur.custom_on ? applyCustomTraining(dryRun) : applyTrainingGroups(dryRun);
+  }
+
+  async function applyCustomTraining(dryRun) {
+    await loadTacticsPage();
+    const squadA = tacticsPageSquad();
+    const squadB = squadFromTacticsData(JSON.parse(await tmPost('/ajax/tactics_get.ajax.php', tmBase(1))));
+    const tiOf = Object.fromEntries(((getSlice('players') || { data: [] }).data || []).map(p => [String(p.id), p.plot || []]));
+    const rows = trainingSlots(squadA, squadB).filter(x => bucketFor(x.p.fp) !== 'GK');
+    const changes = [], failed = [];
+    for (const { p, slot } of rows) {
+      const plan = customPlan(p, slot, tiOf[String(p.id)]);
+      let cur;
+      try { cur = await readCustomTraining(p.id); } catch (e) { failed.push(p.name); continue; }
+      if (!cur || !cur.custom) { failed.push(p.name); continue; }
+      const now6 = [1, 2, 3, 4, 5, 6].map(i => Number(cur.custom['team' + i] && cur.custom['team' + i].points) || 0);
+      if (cur.custom_on && now6.join() === plan.dots.join()) continue;
+      changes.push({ p, from: now6, plan });
+      if (dryRun) continue;
+      await sleep(150);
+      await tmPost('/ajax/training_post.ajax.php', customPayload(p.id, cur, plan.dots));
+      await sleep(120);
+      const after = await readCustomTraining(p.id);
+      const got = [1, 2, 3, 4, 5, 6].map(i => Number(after && after.custom && after.custom['team' + i] && after.custom['team' + i].points) || 0);
+      if (!after || !after.custom_on || got.join() !== plan.dots.join()) failed.push(p.name);
+    }
+    const label = c => `${c.p.name.split(' ').pop()} ${c.from.join('')}→${c.plan.dots.join('')}`;
+    if (!changes.length && !failed.length) return { ok: true, text: `all ${rows.length} outfield plans already right` };
+    return { ok: !failed.length, text: (dryRun ? 'would change ' : 'changed ') + `${changes.length}: ${changes.map(label).join(', ')}` + (failed.length ? ` — not saved/verified: ${failed.join(', ')}` : ''), changes };
+  }
+
+  /* ============================================================
+   *  SECTION 5N — RESERVE TEAM
+   *  ------------------------------------------------------------
+   *  The reserves exist to give youths minutes (routine). Players ≤ 21 who
+   *  aren't in the first team's best XI or its 5 subs are demoted (TM's own
+   *  `check` first; a demotion ties a player down for ≥3 games — TM's text);
+   *  a reserve youth who'd make the first XI better is promoted. Then the
+   *  reserves get a full plan for THEIR next opponent (XI with youths ahead
+   *  of veterans, bench, roles, settings, conditional orders), lock-guarded.
+   * ============================================================ */
+  const RESERVE_MAX_AGE = 21;
+  const RESERVE_YOUTH_BOOST = 1.5; // own heuristic: youths start for the reserves unless badly out of position
+
+  async function playersMove(playerId, move) {
+    return JSON.parse(await tmPost('/ajax/players_move.ajax.php', { player_id: playerId, move }));
+  }
+
+  async function manageReserves(dryRun) {
+    await loadTacticsPage();
+    const squadA = tacticsPageSquad();
+    const resData = JSON.parse(await tmPost('/ajax/tactics_get.ajax.php', tmBase(1)));
+    const squadB = squadFromTacticsData(resData);
+    const sl = k => { const x = getSlice(k); return x && x.data; };
+    const planA = buildMatchPlan(squadA, sl('opponent'), sl('opponentScouting'), sl('opponentExpected'), { restBanRisk: restBanRisk() });
+    const keep = new Set(planA.best.lineup.filter(l => l.player).map(l => String(l.player.id)).concat(planA.bench.named.filter(b => b.player).map(b => String(b.player.id))));
+    const down = squadA.filter(p => (Number(p.age) || 99) < RESERVE_MAX_AGE + 1 && !keep.has(String(p.id)));
+    const ctx = { squad: squadA.map(p => ({ ...p })), base: bestFormation(squadA.map(p => ({ ...p }))) };
+    const up = squadB.filter(p => (Number(p.age) || 99) < RESERVE_MAX_AGE + 1 && xiImpact(p, ctx).gain >= SENIOR_CRITERIA.minXiGain);
+    const lines = [];
+    const short = p => p.name.split(' ').pop();
+    for (const p of down) {
+      const chk = await playersMove(p.id, 'check');
+      if (chk && chk.error) { lines.push(`${short(p)} can't go down (${String(chk.error).replace(/\[player\]/g, short(p)).replace(/<[^>]+>/g, '')})`); continue; }
+      if (dryRun) { lines.push(`would demote ${short(p)}`); continue; }
+      await sleep(150);
+      const r = await playersMove(p.id, 'down');
+      lines.push(r && r.success ? `demoted ${short(p)}` : `${short(p)} not demoted: ${r && r.error ? String(r.error).replace(/<[^>]+>/g, '') : 'no reply'}`);
+    }
+    for (const p of up) {
+      if (dryRun) { lines.push(`would promote ${short(p)}`); continue; }
+      await sleep(150);
+      const r = await playersMove(p.id, 'up');
+      lines.push(r && !r.error ? `promoted ${short(p)}` : `${short(p)} not promoted: ${r && r.error ? String(r.error).replace(/<[^>]+>/g, '') : 'no reply'}`);
+    }
+    const tactic = await applyReservePlan(dryRun);
+    lines.push(tactic.text);
+    return { ok: tactic.ok, text: lines.join('; ') || 'nothing to move' };
+  }
+
+  // Next reserve fixture + its real kickoff. match.ajax gives the time of day in SERVER time (the
+  // first team's says 19:00 while its home page shows 20:00, live), so it's anchored to the first
+  // team's known kickoff instant rather than to any time zone.
+  async function nextReserveFixture() {
+    const club = async id => {
+      const fx = JSON.parse(await (await fetch('/ajax/fixtures.ajax.php', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'type=club&var1=' + id })).text()) || {};
+      const ms = [];
+      Object.values(fx).forEach(mo => (mo && mo.matches || []).forEach(m => ms.push(m)));
+      return ms.filter(m => !m.result).sort((x, y) => String(x.date).localeCompare(String(y.date)))[0] || null;
+    };
+    const b = await club(SESSION.b_team);
+    if (!b) return null;
+    const bJson = await fetchMatchJson(b.id);
+    const nm = getSlice('home') && getSlice('home').data && getSlice('home').data.nextMatch;
+    const aKick = nm ? parseKickoff(nm.when) : null;
+    const a = aKick ? await club(clubId) : null;
+    const aJson = a ? await fetchMatchJson(a.id) : null;
+    const wall = (date, tod) => { const [y, mo, d] = String(date).split('-').map(Number); const [h, mi] = String(tod || '').split(':').map(Number); return isNaN(h) ? null : new Date(y, mo - 1, d, h, mi).getTime(); };
+    const aWall = a && aJson && aJson.match_data ? wall(a.date, aJson.match_data.match_time_of_day) : null;
+    const bWall = bJson && bJson.match_data ? wall(b.date, bJson.match_data.match_time_of_day) : null;
+    const weAreHome = String(b.hometeam) === String(SESSION.b_team);
+    return {
+      id: String(b.id), matchUrl: '/matches/' + b.id + '/', weAreHome,
+      oppId: String(weAreHome ? b.awayteam : b.hometeam), oppName: weAreHome ? b.awayteam_name : b.hometeam_name,
+      kickoff: aKick && aWall != null && bWall != null ? bWall + (aKick - aWall) : null,
+    };
+  }
+
+  // Full reserve plan for their next opponent: youths-first XI, bench, roles, mentality/style/
+  // focus and conditional orders — the first-team engine, with the reserves' own fixture.
+  async function applyReservePlan(dryRun) {
+    const fix = await nextReserveFixture();
+    if (!fix) return { ok: true, text: 'no reserve fixture coming up' };
+    const data = JSON.parse(await tmPost('/ajax/tactics_get.ajax.php', tmBase(1)));
+    const squad = squadFromTacticsData(data);
+    if (squad.filter(p => (!p.ban || p.ban === '0') && !p.inj).length < 11) return { ok: true, text: `reserve tactic skipped: only ${squad.length} players` };
+    const opp = await fetchOpponentSquadReal(fix.oppId).catch(() => []);
+    const opponent = opp.length ? { id: fix.oppId, name: fix.oppName, players: opp, source: 'real-skills' } : null;
+    const expected = opponent ? await fetchNextMatchExpected(fix.matchUrl, fix.oppId, opp).catch(() => null) : null;
+    const boost = p => (Number(p.age) || 99) < RESERVE_MAX_AGE + 1 ? RESERVE_YOUTH_BOOST : 1;
+    const plan = buildMatchPlan(squad, opponent, null, expected, { boost, weAreHome: fix.weAreHome, noEvidence: true, restBanRisk: restBanRisk() });
+    const youths = plan.best.lineup.filter(l => l.player && boost(l.player) > 1).length;
+    const what = `reserves v ${fix.oppName}: ${plan.best.formation}, ${MENTALITY[plan.settings.mentality]} / ${ATT_STYLE[plan.settings.style]} / ${FOCUS_SIDE[plan.settings.focus]}, ${youths} youths starting`;
+    if (!fix.kickoff) return { ok: false, text: `${what} — reserve kickoff unknown, nothing saved` };
+    if (fix.kickoff - now() < TACTICS_LOCK_MS + AUTOPILOT_SAFETY_MS) return { ok: true, text: `${what} — skipped: that match locks an hour before kickoff` };
+    const target = planToTactic(plan);
+    const saved = await readSavedTactic(1);
+    const changes = tacticDiff(target, saved);
+    if (dryRun) return { ok: true, text: `would set ${what} (${changes.length} change(s))` };
+    if (changes.length) await writeTactic(target, saved, 1);
+    const mismatches = tacticMismatches(target, await readSavedTactic(1));
+    return { ok: !mismatches.length, text: mismatches.length ? `${what} — these didn't stick: ${mismatches.join(', ')}` : `set ${what} — verified` };
+  }
+
+  /* ============================================================
+   *  SECTION 5O — YOUTH PULLS  (weekly youth-academy report)
+   *  ------------------------------------------------------------
+   *  User rule: hire potential ≥ 17 where the position is needed, fire the
+   *  rest. Potential at pull is the "real" one (forum guide, post #2: 17-20
+   *  at pull ≈ 100k-500k peak SI). The report's documented fields carry no
+   *  potential (youth.js shows rec_stars only), so the engine acts ONLY when
+   *  a potential value is actually present — otherwise it grades and
+   *  recommends, and never fires on a guess. Never hires past TM's 70-man cap.
+   * ============================================================ */
+  const YOUTH_PULL_MIN_POT = 17;
+  const YOUTH_PULL_ALWAYS_POT = 19; // own heuristic: too good to pass whatever the position
+  const SQUAD_CAP = 70;             // TM's youth page: < 70 players when not in debt
+  function recruitPotential(raw) {
+    for (const k of ['old_pot', 'potential', 'pot', 'youth_potential']) {
+      const v = Number(raw && raw[k]);
+      if (raw && raw[k] != null && raw[k] !== '' && !isNaN(v) && v > 0) return v <= 10 ? v * 2 : v; // ≤10 = half-stars (YD report 'potential' 9 ↔ old_pot 17-18)
+    }
+    return null;
+  }
+  // Depth per line v the XI's needs: 2 natural players per XI slot (own heuristic), +1 where the
+  // first XI's weakest starter plays.
+  function positionNeeds(squad) {
+    const best = bestFormation(squad.map(p => ({ ...p })));
+    const slots = {}, have = {};
+    best.lineup.forEach(l => { slots[l.bucket] = (slots[l.bucket] || 0) + 1; });
+    squad.forEach(p => { const b = bucketFor(p.fp); have[b] = (have[b] || 0) + 1; });
+    const need = {};
+    Object.keys(slots).forEach(b => { need[b] = slots[b] * 2 - (have[b] || 0); });
+    const weakest = best.lineup.filter(l => l.player).sort((a, b) => a.effectiveR5 - b.effectiveR5)[0];
+    if (weakest) need[weakest.bucket] = (need[weakest.bucket] || 0) + 1;
+    return need;
+  }
+
+  async function handleYouthPull(dryRun) {
+    const rep = JSON.parse(await tmPost('/ajax/youth.ajax.php', { type: 'get' }));
+    const recruits = Object.values((rep && rep.players) || {}).filter(Boolean);
+    if (!recruits.length) return { ok: true, text: 'no youth report waiting (they arrive on Saturdays)' };
+    await loadTacticsPage();
+    const need = positionNeeds(tacticsPageSquad());
+    let size = Number(rep.squad_size) || 0;
+    const lines = [];
+    for (const raw of recruits) {
+      const fp = fpFromCodes(raw.favposition) || 'M C', bucket = bucketFor(fp);
+      const pot = recruitPotential(raw);
+      const g = gradeYouthRecruit(raw);
+      const label = `${String(raw.player_name || raw.id).split(' ').pop()} (${fp}${pot ? ', pot ' + pot : ''})`;
+      if (pot == null) { lines.push(`${label}: no potential in the report — ${g.hidden ? 'reveal skills' : (g.verdict ? g.verdict.verdict : '?')}; left for you`); continue; }
+      const hire = pot >= YOUTH_PULL_ALWAYS_POT || (pot >= YOUTH_PULL_MIN_POT && (need[bucket] || 0) > 0);
+      if (hire && size >= SQUAD_CAP) { lines.push(`${label}: would hire, but the squad is at ${size}`); continue; }
+      if (dryRun) { lines.push(`${label}: would ${hire ? 'hire' : 'fire'}`); continue; }
+      await sleep(200);
+      const r = await tmPost('/ajax/youth.ajax.php', { type: 'act', player_id: raw.id, action: hire ? 'hire' : 'fire' });
+      if (hire) size++;
+      lines.push(`${label}: ${hire ? 'hired' : 'fired'}${/error/i.test(r) ? ' — reply: ' + r.slice(0, 80) : ''}`);
+    }
+    const after = JSON.parse(await tmPost('/ajax/youth.ajax.php', { type: 'get' }));
+    const left = Object.values((after && after.players) || {}).filter(Boolean).length;
+    const acted = lines.filter(l => /: (hired|fired)/.test(l)).length;
+    return { ok: dryRun || acted === 0 || left <= recruits.length - acted, text: lines.join('; ') };
+  }
+
+  /* ============================================================
+   *  SECTION 5P — SCOUTING
+   *  ------------------------------------------------------------
+   *  Sends free scouts to your own youths first (A + reserves, youngest
+   *  first) who have no report from a real scout in the last 8 weeks.
+   *  User rule: only scouts with 20 in the stats that matter are worth
+   *  having — with none hired, the step watches the hire list and names any
+   *  that qualify (it never hires: that's your call and your money).
+   * ============================================================ */
+  const SCOUT_MIN = 20;
+  const SCOUT_REPORT_FRESH_MS = 8 * 7 * 864e5;
+  async function scoutInfo(playerId) {
+    return JSON.parse(await tmPost('/ajax/players_get_info.ajax.php', { player_id: playerId, type: 'scout', show_non_pro_graphs: true }));
+  }
+  async function hireableTopScouts() {
+    const doc = await fetchDoc('/scouts/hire/');
+    const out = [];
+    doc.querySelectorAll('tr').forEach(tr => {
+      const td = [...tr.querySelectorAll('td')];
+      if (td.length < 8) return;
+      const vals = td.slice(1, 8).map(x => Number(x.textContent.trim()) || 0); // Sen Yth Phy Tac Tec Dev Psy
+      const names = ['Sen', 'Yth', 'Phy', 'Tac', 'Tec', 'Dev', 'Psy'];
+      const twenties = names.filter((n, i) => vals[i] >= SCOUT_MIN && n !== 'Sen' && n !== 'Psy');
+      if (twenties.length) out.push(`${td[0].textContent.trim().split('(')[0].trim()} (20 in ${twenties.join('/')})`);
+    });
+    return out;
+  }
+  async function scoutingStep(dryRun) {
+    await loadTacticsPage();
+    const squadA = tacticsPageSquad();
+    const squadB = squadFromTacticsData(JSON.parse(await tmPost('/ajax/tactics_get.ajax.php', tmBase(1))));
+    const info = await scoutInfo(squadA[0].id);
+    const scouts = Object.values((info && info.scouts) || {});
+    if (!scouts.length) {
+      const top = await hireableTopScouts();
+      return { ok: true, text: top.length ? `no scouts hired — on the market now: ${top.join(', ')} (Scouts → Hire)` : 'no scouts hired, and nobody on the hire list has a 20 in Yth/Phy/Tac/Tec/Dev yet' };
+    }
+    const free = scouts.filter(s => !s.away);
+    if (!free.length) return { ok: true, text: `all ${scouts.length} scout(s) out (${scouts.map(s => s.returns || 'away').join(', ')})` };
+    const youths = squadA.concat(squadB).filter(p => (Number(p.age) || 99) < RESERVE_MAX_AGE + 1).sort((a, b) => a.age - b.age);
+    const targets = [];
+    for (const p of youths) {
+      if (targets.length >= free.length) break;
+      await sleep(120);
+      const reports = Object.values(((await scoutInfo(p.id)) || {}).reports || {});
+      const fresh = reports.some(r => String(r.scoutid) !== '0' && r.done && now() - new Date(r.done).getTime() < SCOUT_REPORT_FRESH_MS);
+      if (!fresh) targets.push(p);
+    }
+    if (!targets.length) return { ok: true, text: 'every youth has a recent scout report' };
+    const sorted = [...free].sort((a, b) => ((+b.youths || 0) + (+b.development || 0)) - ((+a.youths || 0) + (+a.development || 0)));
+    const lines = [];
+    for (let i = 0; i < targets.length && i < sorted.length; i++) {
+      const s = sorted[i], p = targets[i];
+      if (dryRun) { lines.push(`would send ${s.name} ${s.surname} to ${p.name}`); continue; }
+      await sleep(200);
+      await tmPost('/ajax/players_get_info.ajax.php', { player_id: p.id, type: 'scout', scout_id: s.id, show_non_pro_graphs: true });
+      lines.push(`sent ${s.name} ${s.surname} to ${p.name}`);
+    }
+    return { ok: true, text: lines.join('; ') };
   }
 
   /* ============================================================
@@ -4079,8 +4476,11 @@
         <button class="tma-btn" id="tma-ap-run">⚡ Prepare match</button>
         <div class="tma-progress" id="tma-ap-status"></div>
         <div class="tma-mini" style="margin:10px 0 2px;text-transform:uppercase;letter-spacing:.04em;">Steps</div>
-        ${toggle('tma-step-training', st.training, 'Training groups — each player in the drill that trains what his position needs')}
+        ${toggle('tma-step-reserves', st.reserves, 'Reserves — youths (≤21) outside the first XI + bench go down for minutes, promoted when they\'d start; full tactic + conditional orders for the reserves\' own opponent, youths first')}
         ${toggle('tma-step-tactics', st.tactics, 'Opponent scan → XI, bench, captain &amp; set pieces, mentality/style/focus, conditional orders')}
+        ${toggle('tma-step-training', st.training, 'Custom training — your role templates, tweaked per player toward his weakest key skills; balanced once fully developed')}
+        ${toggle('tma-step-youth', st.youth, 'Youth pull — hire potential ≥17 where the position is needed, fire the rest (only when the report shows potential)')}
+        ${toggle('tma-step-scouting', st.scouting, 'Scouting — free scouts to your youths first; flags 20-rated scouts on the hire list')}
         ${toggle('tma-step-facilities', st.facilities, 'Facility upgrades <b>(spends cash)</b> — training/youth first, else income that pays back within 26 weeks; one per run, never into the wage reserve')}
         <div class="tma-mini" style="margin:10px 0 2px;text-transform:uppercase;letter-spacing:.04em;">Automation</div>
         ${toggle('tma-ap-on', ap.enabled, 'Run by itself before each match (whenever you open a TM page) — once per match, never inside the tactics lock')}
@@ -4093,6 +4493,12 @@
     flip('tma-ap-on', v => setAutopilotPrefs({ ...autopilotPrefs(), enabled: v }));
     flip('tma-ap-dry', v => setAutopilotPrefs({ ...autopilotPrefs(), dryRun: v }));
     flip('tma-step-training', v => setCopilotSteps({ ...copilotSteps(), training: v }));
+    flip('tma-step-reserves', v => setCopilotSteps({ ...copilotSteps(), reserves: v }));
+    flip('tma-step-youth', v => {
+      if (v && !window.confirm('Youth pulls hire (fee + wage) and FIRE recruits — firing is permanent. Let the copilot act on each report?')) return false;
+      setCopilotSteps({ ...copilotSteps(), youth: v });
+    });
+    flip('tma-step-scouting', v => setCopilotSteps({ ...copilotSteps(), scouting: v }));
     flip('tma-step-tactics', v => setCopilotSteps({ ...copilotSteps(), tactics: v }));
     flip('tma-step-facilities', v => {
       if (v && !window.confirm('Facility upgrades spend club cash and take weeks to build. Let the copilot start one when the rules say it is needed?')) return false;
