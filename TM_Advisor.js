@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.9.0
+// @version      3.10.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -51,6 +51,7 @@
  *   SECTION 5E TRAINING RECOMMENDATIONS (weak-primary + plateau + bloom advice)
  *   SECTION 5F LEAGUE STRENGTH       (rank clubs by best-XI R5)
  *   SECTION 5G APPLY TO TACTICS PAGE (Preview/Apply/Undo, read-back verified)
+ *   SECTION 5H AUTOPILOT             (off by default; once per match, kickoff-guarded)
  *   SECTION 6  STADIUM ENGINE        (upgrade ROI ranking)
  *   SECTION 7  UI                    (styles, panel; ONE context-relevant
  *                                       tab per page)
@@ -2788,7 +2789,7 @@
     handling: 'han', one_on_ones: 'one', reflexes: 'ref', aerial_ability: 'ari', jumping: 'jum', communication: 'com', kicking: 'kic', throwing: 'thr',
   };
   function tacticsPageSquad() {
-    if (!onTacticsPage() || !tacticsPageData) return null;
+    if (!tacticsPageData) return null;
     const star = v => typeof v === 'number' ? v : Number((String(v).match(/alt='(\d+)'/) || [])[1] || v); // star skills are <img alt='19|20'>
     return Object.values(tacticsPageData.players).map(p => {
       const skills = {};
@@ -2817,19 +2818,25 @@
 
   const tmPost = (url, data) => new Promise((resolve, reject) =>
     window.jQuery.post(url, data, resolve, 'text').fail((x, status, err) => reject(new Error(url + ': ' + (err || status)))));
-  const tmBase = () => ({ reserves: window.reserves, national: window.national, miniGameId: window.miniGameId });
+  // Main team = 0/0/0. Off /tactics/ these page vars don't exist (and `window.national` could
+  // even resolve to a DOM element by id), so only plain digits are trusted.
+  const pageNum = v => /^\d+$/.test(String(v)) && typeof v !== 'object' ? String(v) : '0';
+  const tmBase = () => ({ reserves: pageNum(window.reserves), national: pageNum(window.national), miniGameId: pageNum(window.miniGameId) });
 
   // Saved orders come from the endpoint, not the page global, which can lag behind a save.
   async function fetchCondOrders() {
     const txt = await tmPost('/ajax/tactics_co_get.ajax.php', { get: 'cond_orders', ...tmBase() });
     try { return JSON.parse(txt) || []; } catch (e) { return window.cond_orders || []; }
   }
+  // Reads the SERVER's copy from any page: positions via tactics_get, the three settings from
+  // a fetched /tactics/ (its <option selected> is the saved value), orders via tactics_co_get.
   async function readSavedTactic() {
-    const $ = window.jQuery;
     const assoc = (await loadTacticsPage()).formation_assoc || {};
+    const doc = await fetchDoc('/tactics/');
+    const sel = id => { const o = doc.querySelector('#' + id + ' option[selected]'); return o ? String(o.value) : '0'; };
     return {
       onField: Object.fromEntries(TACTIC_KEYS.map(k => [k, String(assoc[k] || '0')])),
-      mentality: String($('#mentality_select').val()), style: String($('#attacking_select').val()), focus: String($('#focus_side_select').val()),
+      mentality: sel('mentality_select'), style: sel('attacking_select'), focus: sel('focus_side_select'),
       orders: (await fetchCondOrders()).slice(0, 5),
     };
   }
@@ -2907,6 +2914,89 @@
       if (ORDER_FIELDS.some(f => String(s[f] == null ? '' : s[f]) !== String(o[f] == null ? '' : o[f]))) rows.push(['Order ' + (i + 1), desc(s), desc(o)]);
     });
     return rows;
+  }
+
+  /* ============================================================
+   *  SECTION 5H — AUTOPILOT  (off by default)
+   *  ------------------------------------------------------------
+   *  When switched on, opening any TM page applies the match plan for the
+   *  next fixture: once per match, at most one attempt per 20 min, never
+   *  within an hour of kickoff, and only against the opponent we actually
+   *  play. Same write + read-back as Apply (Section 5G). Dry run logs the
+   *  plan without saving.
+   * ============================================================ */
+
+  const AUTOPILOT_KEY = 'tmAdvisor_autopilot'; // { enabled, dryRun }
+  const AUTOPILOT_GAP_MS = 20 * 60e3;
+  const KICKOFF_MARGIN_MS = 60 * 60e3; // kickoff is shown without a timezone — an hour covers the skew
+  const autopilotPrefs = () => { try { return JSON.parse(localStorage.getItem(AUTOPILOT_KEY)) || {}; } catch (e) { return {}; } };
+  function setAutopilotPrefs(p) {
+    try { localStorage.setItem(AUTOPILOT_KEY, JSON.stringify(p)); } catch (e) {}
+    const st = getSlice('autopilot');
+    setSlice('autopilot', { ...(st && st.data), doneMatchId: null, lastTry: 0 }); // a changed switch earns a fresh run
+  }
+
+  // Home page shows e.g. "National First Division Group 2, 1. November 19:00" (no year).
+  const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+  function parseKickoff(when) {
+    const m = String(when || '').match(/(\d{1,2})\.\s*([A-Za-z]+)\s+(\d{1,2}):(\d{2})/);
+    const month = m ? MONTHS.indexOf(m[2].toLowerCase()) : -1;
+    if (month < 0) return null;
+    const today = new Date();
+    const d = new Date(today.getFullYear(), month, +m[1], +m[3], +m[4]);
+    if (today - d > 180 * 864e5) d.setFullYear(d.getFullYear() + 1); // a January fixture seen in December
+    return d.getTime();
+  }
+
+  function autopilotLog(msg, ok, extra) {
+    const entry = { t: now(), msg, ok, ...(extra || {}) };
+    const prev = (getSlice('autopilotLog') || { data: [] }).data;
+    setSlice('autopilotLog', [entry].concat(prev).slice(0, 30));
+    return entry;
+  }
+
+  async function runAutopilot(force) {
+    const prefs = autopilotPrefs();
+    if (!prefs.enabled && !force) return null;
+    const state = (getSlice('autopilot') || { data: {} }).data || {};
+    if (!force && state.lastTry && now() - state.lastTry < AUTOPILOT_GAP_MS) return null;
+    setSlice('autopilot', { ...state, lastTry: now() }); // claimed first, so a second open tab backs off
+    try {
+      const home = parseHome(await fetchDoc('/home/'));
+      setSlice('home', home);
+      const nm = home.nextMatch;
+      const matchId = nm && nm.matchUrl ? (nm.matchUrl.match(/\/matches\/(\d+)/) || [])[1] : null;
+      if (!matchId) return autopilotLog('No upcoming match found.', true);
+      if (!force && state.doneMatchId === matchId) return null; // once per match: later manual edits stand
+      const vs = nm.home && String(nm.home.id) === clubId ? nm.away.name : nm.home.name;
+      const kickoff = parseKickoff(nm.when);
+      if (!kickoff) return autopilotLog(`Kickoff time unreadable ("${nm.when}") — nothing saved.`, false, { matchId });
+      if (kickoff - now() < KICKOFF_MARGIN_MS) return autopilotLog(`Less than an hour to kickoff v ${vs} — nothing saved.`, false, { matchId });
+      await refreshAll(); // next opponent's squad + recent tactics + expected line-up
+      const ready = opponentReadiness();
+      if (!ready.ready) return autopilotLog(ready.text + ' — nothing saved.', false, { matchId });
+      await loadTacticsPage();
+      const sl = k => { const s = getSlice(k); return s && s.data; };
+      const plan = buildMatchPlan(tacticsPageSquad(), sl('opponent'), sl('opponentScouting'), sl('opponentExpected'), { restBanRisk: restBanRisk() });
+      const target = planToTactic(plan);
+      const saved = await readSavedTactic();
+      const changes = tacticDiff(target, saved);
+      const markDone = () => setSlice('autopilot', { ...getSlice('autopilot').data, doneMatchId: matchId });
+      if (prefs.dryRun) {
+        markDone();
+        return autopilotLog(`Dry run v ${vs}: ${changes.length} change(s) planned, nothing saved.`, true, { matchId, changes });
+      }
+      if (changes.length) {
+        setSlice('tacticsBackup', saved);
+        await writeTactic(target, saved);
+      }
+      const mismatches = tacticMismatches(target, await readSavedTactic());
+      if (mismatches.length) return autopilotLog(`Saved v ${vs}, but these didn't stick: ${mismatches.join(', ')}.`, false, { matchId });
+      markDone();
+      return autopilotLog(changes.length ? `Applied v ${vs}: ${changes.length} change(s), verified.` : `Tactic v ${vs} already matched the plan.`, true, { matchId, changes });
+    } catch (e) {
+      return autopilotLog('Autopilot failed: ' + e.message, false);
+    }
   }
 
   /* ============================================================
@@ -3350,13 +3440,43 @@
         <h4>Next Match</h4>
         ${nmHtml}
       </div>
+      ${autopilotCardHtml()}
     `;
+    bindAutopilotCard();
     document.getElementById('tma-refresh').addEventListener('click', async () => {
       const prog = document.getElementById('tma-progress');
       await refreshAll((key, status) => {
         prog.textContent = 'Refreshing ' + key + '… ' + status;
       });
       prog.textContent = 'Done ✔';
+      renderDashboard();
+    });
+  }
+
+  function autopilotCardHtml() {
+    const ap = autopilotPrefs();
+    const entries = ((getSlice('autopilotLog') || { data: [] }).data || []).slice(0, 5);
+    const toggle = (id, on, text) => `<label class="tma-mini" style="display:flex;gap:6px;align-items:center;margin:4px 0;cursor:pointer;color:var(--tma-text);"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}> ${text}</label>`;
+    return `
+      <div class="tma-card">
+        <h4>Autopilot <span class="tma-badge">${ap.enabled ? (ap.dryRun ? 'dry run' : 'on') : 'off'}</span></h4>
+        ${toggle('tma-ap-on', ap.enabled, 'Apply the match plan before each match')}
+        ${toggle('tma-ap-dry', ap.dryRun, 'Dry run — log the plan, save nothing')}
+        <div class="tma-mini" style="margin:6px 0;">Runs when you open any TM page: once per match, at most every 20 min, never within an hour of kickoff, and only once the next opponent is scanned. Every save is read back; Undo is on the Tactics page.</div>
+        ${entries.map(e => `<div class="tma-row"><span style="color:${e.ok ? 'var(--tma-lime)' : 'var(--tma-amber)'};">${e.ok ? '✔' : '⚠'} ${esc(e.msg)}</span><span class="tma-mini">${ago(e.t)}</span></div>`).join('')}
+        <button class="tma-btn secondary" id="tma-ap-run">Run now</button>
+        <div class="tma-progress" id="tma-ap-status"></div>
+      </div>`;
+  }
+  function bindAutopilotCard() {
+    const flip = (id, key) => { const el = document.getElementById(id); if (el) el.addEventListener('change', () => { setAutopilotPrefs({ ...autopilotPrefs(), [key]: el.checked }); renderDashboard(); }); };
+    flip('tma-ap-on', 'enabled');
+    flip('tma-ap-dry', 'dryRun');
+    bindBtn('tma-ap-run', async () => {
+      const st = document.getElementById('tma-ap-status'), btn = document.getElementById('tma-ap-run');
+      btn.disabled = true;
+      st.textContent = 'Running — scanning the next opponent and planning…';
+      await runAutopilot(true);
       renderDashboard();
     });
   }
@@ -3928,6 +4048,8 @@
     if (!dockDisabledHere()) buildPanel();
     autoCaptureCurrentPage();
     if (location.pathname.startsWith('/tactics')) verifyPendingApply();
+    // Top window only (not TM's iframes), after the page has settled.
+    if (window.top === window) setTimeout(() => { runAutopilot().catch(e => console.warn('TM Advisor: autopilot', e)); }, 4000);
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') boot();
