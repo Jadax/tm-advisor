@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.17.0
+// @version      3.18.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -3784,6 +3784,17 @@
     const down = squadA.filter(p => (Number(p.age) || 99) < RESERVE_MAX_AGE + 1 && !keep.has(String(p.id)));
     const ctx = { squad: squadA.map(p => ({ ...p })), base: bestFormation(squadA.map(p => ({ ...p }))) };
     const up = squadB.filter(p => (Number(p.age) || 99) < RESERVE_MAX_AGE + 1 && xiImpact(p, ctx).gain >= SENIOR_CRITERIA.minXiGain);
+    // XI + 5 subs = 16: below that the first team can't name a full bench, so the best fit B
+    // players (any age) go up, by how much they'd add to the XI.
+    const fit = p => (!p.ban || p.ban === '0') && !p.inj;
+    const downIds = new Set(down.map(p => String(p.id)));
+    const short16 = 16 - squadA.filter(p => fit(p) && !downIds.has(String(p.id))).length - up.filter(fit).length;
+    if (short16 > 0) {
+      const upIds = new Set(up.map(p => String(p.id)));
+      squadB.filter(p => fit(p) && !upIds.has(String(p.id)))
+        .map(p => ({ p, g: xiImpact(p, ctx).gain })).sort((x, y) => y.g - x.g)
+        .slice(0, short16).forEach(x => up.push(x.p));
+    }
     const lines = [];
     const short = p => p.name.split(' ').pop();
     for (const p of down) {
@@ -3854,17 +3865,25 @@
     const opponent = opp.length ? { id: fix.oppId, name: fix.oppName, players: opp, source: 'real-skills' } : null;
     const expected = opponent ? await fetchNextMatchExpected(fix.matchUrl, fix.oppId, opp).catch(() => null) : null;
     const boost = p => (Number(p.age) || 99) < RESERVE_MAX_AGE + 1 ? RESERVE_YOUTH_BOOST : 1;
-    const plan = buildMatchPlan(squad, opponent, null, expected, { boost, weAreHome: fix.weAreHome, noEvidence: true, restBanRisk: restBanRisk() });
+    const scouting = opponent ? await buildOpponentScoutingReport(fix.oppId, opp).catch(() => null) : null;
+    const plan = buildMatchPlan(squad, opponent, scouting, expected, { boost, weAreHome: fix.weAreHome, noEvidence: true, restBanRisk: restBanRisk() });
     const youths = plan.best.lineup.filter(l => l.player && boost(l.player) > 1).length;
+    const record = ok => setSlice('reservePlan', {
+      matchId: fix.id, matchUrl: fix.matchUrl, opp: fix.oppName, weAreHome: fix.weAreHome, kickoff: fix.kickoff,
+      formation: plan.best.formation, settings: plan.settings, youths, scouted: !!scouting, orders: (plan.condOrders || []).length,
+      xi: plan.best.lineup.filter(l => l.player).map(l => ({ slot: l.slot, id: String(l.player.id), name: l.player.name, age: l.player.age })),
+      ok,
+    });
     const what = `reserves v ${fix.oppName}: ${plan.best.formation}, ${MENTALITY[plan.settings.mentality]} / ${ATT_STYLE[plan.settings.style]} / ${FOCUS_SIDE[plan.settings.focus]}, ${youths} youths starting`;
     if (!fix.kickoff) return { ok: false, text: `${what} — reserve kickoff unknown, nothing saved` };
     if (fix.kickoff - now() < TACTICS_LOCK_MS + AUTOPILOT_SAFETY_MS) return { ok: true, text: `${what} — skipped: that match locks an hour before kickoff` };
     const target = planToTactic(plan);
     const saved = await readSavedTactic(1);
     const changes = tacticDiff(target, saved);
-    if (dryRun) return { ok: true, text: `would set ${what} (${changes.length} change(s))` };
+    if (dryRun) { record(!changes.length); return { ok: true, text: `would set ${what} (${changes.length} change(s))` }; }
     if (changes.length) await writeTactic(target, saved, 1);
     const mismatches = tacticMismatches(target, await readSavedTactic(1));
+    record(!mismatches.length);
     return { ok: !mismatches.length, text: mismatches.length ? `${what} — these didn't stick: ${mismatches.join(', ')}` : `set ${what} — verified` };
   }
 
@@ -4323,7 +4342,7 @@
     panel.innerHTML = `
       <div class="tma-head" id="tma-drag-handle">
         <div class="tma-head-row">
-          <div class="tma-title">TM Advisor <span id="tma-status-slot">${matchStatusHtml()}</span></div>
+          <div class="tma-title">TM Advisor <span id="tma-status-slot">${matchStatusHtml()}${reserveStatusHtml()}</span></div>
           <div class="tma-head-actions">
             <span class="tma-icon-btn" id="tma-collapse-toggle" title="Collapse / expand"><span class="tma-chevron">▾</span></span>
           </div>
@@ -4402,9 +4421,19 @@
     const when = kickoffText(m);
     return `<span class="tma-status ${m.applied ? 'ok' : 'warn'}" title="${m.applied ? 'A plan was applied for this match' : 'No plan applied for this match yet — open Tactics'}">v ${esc(name)}${when ? ' · ' + when : ''} · ${m.applied ? '✔ tactic set' : '⚠ tactic not set'}</span>`;
   }
+  function reserveStatus() {
+    const r = getSlice('reservePlan') && getSlice('reservePlan').data;
+    if (!r || (r.kickoff && now() > r.kickoff + 2 * 3600e3)) return null;
+    return r;
+  }
+  function reserveStatusHtml() {
+    const r = reserveStatus();
+    if (!r) return '';
+    return `<span class="tma-status ${r.ok ? 'ok' : 'warn'}" title="Reserves v ${esc(r.opp || '?')}">B · ${r.ok ? '✔ set' : '⚠ not set'}</span>`;
+  }
   function refreshMatchStatus() {
     const slot = document.getElementById('tma-status-slot');
-    if (slot) slot.innerHTML = matchStatusHtml();
+    if (slot) slot.innerHTML = matchStatusHtml() + reserveStatusHtml();
   }
 
   // Human-readable label per advisor tab, used to render the single relevant tab for
@@ -4495,6 +4524,7 @@
       <div class="tma-row"><span class="tma-mini">${esc(nm.when || '')}</span><span class="tma-mini">${nmi ? esc(kickoffText(nmi)) : ''}</span></div>
       ${nmi && nmi.prediction ? `<div class="tma-row"><span>Expected (model)</span><span class="tma-goodval">${nmi.prediction.gd >= 0 ? '+' : ''}${nmi.prediction.gd.toFixed(1)} goals</span></div>` : ''}
       <div class="tma-row"><span>Tactic</span><span style="color:${nmi && nmi.applied ? 'var(--tma-lime)' : 'var(--tma-amber)'};font-weight:700;">${nmi && nmi.applied ? '✔ applied for this match' : '⚠ not applied yet'}</span></div>
+      ${reserveRowHtml()}
       ` : `<div class="tma-mini">No data yet.</div>`;
 
     const lastResult = c.lastMatchResult;
@@ -4576,6 +4606,23 @@
     });
   }
 
+  function reserveRowHtml() {
+    const r = reserveStatus();
+    if (!r) return '<div class="tma-row"><span>Reserves</span><span class="tma-mini">not prepared yet — ⚡ Prepare match</span></div>';
+    return `<div class="tma-row"><span>Reserves v ${esc(r.opp || '?')}</span><span style="color:${r.ok ? 'var(--tma-lime)' : 'var(--tma-amber)'};font-weight:700;">${r.ok ? '✔ ' : '⚠ '}${esc(r.formation)}${r.kickoff ? ' · ' + esc(kickoffText({ kickoff: r.kickoff, lockAt: r.kickoff - TACTICS_LOCK_MS })) : ''}</span></div>`;
+  }
+  function reservePlanHtml() {
+    const r = reserveStatus();
+    if (!r) return '';
+    const st = r.settings || {};
+    const rows = (r.xi || []).map(x => `<div class="tma-row"><span class="tma-mini">${esc(String(x.slot).toUpperCase())}</span><span>${esc(x.name)}${Number(x.age) <= RESERVE_MAX_AGE ? ' <span class="tma-badge">youth</span>' : ''}</span></div>`).join('');
+    return `
+      <div class="tma-card">
+        <h4>Reserves v ${esc(r.opp || '?')} <span class="tma-badge">${r.ok ? 'saved ✔' : 'not saved'}</span></h4>
+        <div class="tma-mini" style="margin-bottom:6px;">${esc(r.formation)} · ${esc(MENTALITY[st.mentality] || '?')} / ${esc(ATT_STYLE[st.style] || '?')} / ${esc(FOCUS_SIDE[st.focus] || '?')} · ${r.youths} youths starting · ${r.orders} conditional orders · ${r.scouted ? 'opponent scouted' : 'no opponent history'} · ${r.weAreHome ? 'home' : 'away'}</div>
+        ${rows}
+      </div>`;
+  }
   function renderTactics() {
     const body = document.getElementById('tma-body');
     const playersSlice = getSlice('players');
@@ -4713,6 +4760,7 @@
         ${condOrdersHtml}
       </div>
       ${expectedTacticsHtml}
+      ${reservePlanHtml()}
       ${progressHtml}
       ${trainingHtml}
     `;

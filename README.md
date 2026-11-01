@@ -33,7 +33,7 @@ One **⚡ Prepare match** button — at the top of the panel on every page, the 
 | Step | What it does |
 |---|---|
 | Opponent scan | Their squad with real skills, the XI they've saved for this fixture, their last 5 matches' tactics |
-| Reserves | Youths (≤21) outside the first XI + bench go down for minutes and routine; promoted back when they'd start. The reserves get their own full plan for *their* next opponent — youths first, settings, conditional orders |
+| Reserves | Youths (≤21) outside the first XI + bench go down for minutes and routine; promoted back when they'd start. If the first team drops below 16 fit players, the best reserves go up. The reserves get their own full plan for *their* next opponent (squad + recent tactics scouted) — youths first, settings, roles, conditional orders. The header shows both teams' status (`B · ✔ set`); the Tactics tab shows the reserve XI |
 | Tactics & orders | XI, bench, captain & set-piece takers, mentality/style/focus and all 5 conditional orders |
 | Custom training *(TM Pro)* | Starts from the community-standard role templates (DEF 2-3-2-2-3-0, MID 2-1-2-3-2-2, WING 2-1-3-2-2-2, FWD 2-0-2-2-3-3), then moves up to 2 dots per player toward his weakest key skills; groups that stalled for 3 weeks count half; fully developed players go 2-2-2-2-2-2. Without Pro it sets the standard drill groups instead |
 | Youth pull | On each weekly youth report: hire potential ≥17 where the squad needs that position, fire the rest — only when the report actually shows potential |
