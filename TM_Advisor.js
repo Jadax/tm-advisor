@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.10.0
+// @version      3.11.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -52,6 +52,8 @@
  *   SECTION 5F LEAGUE STRENGTH       (rank clubs by best-XI R5)
  *   SECTION 5G APPLY TO TACTICS PAGE (Preview/Apply/Undo, read-back verified)
  *   SECTION 5H AUTOPILOT             (off by default; once per match, kickoff-guarded)
+ *   SECTION 5I LEARNING              (division match bank, fitted result model,
+ *                                       evidence-gated mentality/style, graded predictions)
  *   SECTION 6  STADIUM ENGINE        (upgrade ROI ranking)
  *   SECTION 7  UI                    (styles, panel; ONE context-relevant
  *                                       tab per page)
@@ -826,7 +828,10 @@
   // same playerR5() / calculateR5() machinery in Section 2B can be reused unchanged.
   function normaliseAjaxPlayer(raw) {
     return {
-      id: raw.id, name: raw.name || raw.surname || 'Unknown', fp: raw.fp,
+      // players_get_select sends `player_name` (no `name`) — reading only name/surname is why
+      // every scanned opponent showed as "Unknown".
+      id: raw.id, name: raw.player_name || raw.name || raw.lastname || raw.surname || 'Unknown', fp: raw.fp,
+      ban: raw.ban != null ? String(raw.ban) : '0', inj: raw.injury && String(raw.injury) !== '0' ? raw.injury : null,
       // age isn't always present in this endpoint; capture it when it is so the Youth
       // Finder can age-filter players from ANY club we scan, not just our own squad.
       // Unlike players_ar, this endpoint gives whole years in `age` and a SEPARATE `month`
@@ -836,7 +841,9 @@
       // rather than rounded down to the nearest whole year.
       age: (raw.age !== undefined && raw.age !== null && raw.age !== '') ? parseFloat(raw.age) + (parseInt(raw.month, 10) || 0) / 12 : null,
       asi: raw.asi, routine: raw.rutine !== undefined ? parseFloat(raw.rutine) : 0,
-      rec: parseFloat(raw.rec) || 0,
+      // `rec_count` is the star rating (3.5); `rec` is an unrelated raw figure (≈14) that made
+      // every scanned opponent look 4× stronger on the star scale the result model uses.
+      rec: parseFloat(raw.rec_count) || 0,
       skills: {
         str: raw.strength, sta: raw.stamina, pac: raw.pace, mar: raw.marking, tac: raw.tackling,
         wor: raw.workrate, pos: raw.positioning, pas: raw.passing, cro: raw.crossing, tec: raw.technique,
@@ -1033,7 +1040,11 @@
       const raw = lineup[pid];
       const p = squadById[String(pid)];
       const fp = (p && p.fp) || (raw && (raw.favposition || raw.fp)) || '?';
-      return { id: pid, name: p ? p.name : (raw ? (raw.nameLast || raw.name || 'Player ' + pid) : 'Player ' + pid), fp };
+      // `slot` (their saved position for THIS fixture) lets focus/strength read the XI they'll
+      // actually field rather than their whole squad; rec/routine feed the result model (5I).
+      return { id: pid, name: p ? p.name : (raw ? (raw.nameLast || raw.name || 'Player ' + pid) : 'Player ' + pid), fp,
+        slot: raw && raw.position ? String(raw.position).toLowerCase() : null,
+        rec: raw && raw.rec != null ? parseFloat(raw.rec) : null, routine: raw && raw.routine != null ? parseFloat(raw.routine) : null };
     });
 
     // Only report a formation when the starter count is plausible (9-11 outfield+GK) — a
@@ -2048,16 +2059,33 @@
     return { captain, freeKick: rank('fk'), corner: rank('ck'), penalty: rank('pk') };
   }
 
+  // Opponent XI on the same scale as ours (slot R5 × TM penalty): the XI they've saved for
+  // this fixture when the pre-match line-up is out, else their best XI from our own engine.
+  // (Was: the top 11 raw R5s of the whole squad — could count three keepers, ignored bans.)
+  function opponentXI(opponent, expected) {
+    const all = opponent.players || [];
+    const byId = Object.fromEntries(all.filter(p => p.id != null).map(p => [String(p.id), p]));
+    const saved = expected && Array.isArray(expected.xi) ? expected.xi.filter(x => x.slot && SLOT_NUM[x.slot] != null && byId[String(x.id)]) : [];
+    if (saved.length >= 9) {
+      const lineup = saved.map(x => ({ slot: x.slot, bucket: slotBucket(x.slot), side: slotSide(x.slot), player: byId[String(x.id)], effectiveR5: slotRating(byId[String(x.id)], x.slot) }))
+        .filter(l => isFinite(l.effectiveR5));
+      return { source: 'expected', lineup };
+    }
+    const fit = all.filter(p => (!p.ban || p.ban === '0') && !p.inj);
+    const best = bestFormation((fit.length >= 11 ? fit : all).map(p => ({ ...p })));
+    return { source: 'best', lineup: best.lineup.filter(l => l.player) };
+  }
+
   function recommendTacticSettings(myXI, opponent, scouting, expected) {
     // Compare our starting XI's average R5 against the opponent's likely-best-XI average R5.
     // Both sides are now on the same R5 scale (real skills when available via the AJAX
     // endpoint, or a rough star*22 estimate as fallback) — see fetchOpponentSquadReal().
     const myAvg = myXI.totalRec / myXI.lineup.filter(l => l.player).length;
     let oppAvg = null, oppSource = null;
-    if (opponent && opponent.players && opponent.players.length) {
-      const vals = opponent.players.map(p => p._r5).filter(v => typeof v === 'number' && !isNaN(v)).sort((a, b) => b - a);
-      const bestXICount = Math.min(11, vals.length);
-      if (bestXICount) { oppAvg = vals.slice(0, bestXICount).reduce((a, b) => a + b, 0) / bestXICount; oppSource = opponent.source; }
+    const oppXI = opponent && opponent.players && opponent.players.length ? opponentXI(opponent, expected) : null;
+    if (oppXI && oppXI.lineup.length) {
+      oppAvg = oppXI.lineup.reduce((a, l) => a + l.effectiveR5, 0) / oppXI.lineup.length;
+      oppSource = opponent.source;
     }
     let mentality = 4; // Normal
     let reasoning = [];
@@ -2110,7 +2138,7 @@
     const STYLE_SKILLS = { 2: { pac: 1, lon: 0.5 }, 3: { cro: 1, pac: 0.5 }, 4: { pas: 1, tec: 1 }, 5: { lon: 1, pas: 0.5 }, 6: { tec: 1, pas: 0.5 } };
     const styleFit = w => Object.entries(w).reduce((t, [k, x]) => t + avgSkill(k) * x, 0) / Object.values(w).reduce((a, b) => a + b, 0);
     const styleRank = Object.entries(STYLE_SKILLS).map(([k, w]) => [Number(k), styleFit(w)]).sort((a, b) => b[1] - a[1]);
-    const style = styleRank[0][1] - styleRank[1][1] >= 0.5 ? styleRank[0][0] : 1;
+    let style = styleRank[0][1] - styleRank[1][1] >= 0.5 ? styleRank[0][0] : 1;
     reasoning.push('Attacking style "' + ATT_STYLE[style] + '" (own heuristic) — ' + (style === 1
       ? 'no style clearly fits the XI better than another (top two within 0.5 skill points), so Balanced.'
       : 'clearest fit for the XI\'s skills') + ' (Cro ' + cro.toFixed(1) + ', Pas ' + pas.toFixed(1) + ', Tec ' + tec.toFixed(1) + ', Lon ' + lon.toFixed(1) + ', Pac ' + pac.toFixed(1) + ').');
@@ -2126,6 +2154,10 @@
     const rightAvg = rightPlayers.length ? rightPlayers.reduce((s, l) => s + l.effectiveR5, 0) / rightPlayers.length : null;
 
     const oppDefSideAvg = (side) => {
+      if (oppXI && oppXI.source === 'expected') {
+        const vals = oppXI.lineup.filter(l => l.side === side && (l.bucket === 'D' || l.bucket === 'DM')).map(l => l.effectiveR5);
+        return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+      }
       if (!opponent || !opponent.players) return null;
       const defenders = opponent.players.filter(p => { const b = bucketFor(p.fp); return b === 'D' || b === 'DM'; });
       const vals = defenders.filter(p => sideFor(p.fp) === side).map(p => p._r5).filter(v => typeof v === 'number' && !isNaN(v));
@@ -2165,7 +2197,22 @@
       myAvg,
       oppAvg
     );
-    return { mentality, style, focus, reasoning, counter: fcDiff.counter, difficulty: fcDiff.difficulty };
+    // Evidence from the division's own results (Section 5I) may replace the heuristic picks.
+    const model = fitResultModel();
+    const nmNext = getSlice('home') && getSlice('home').data && getSlice('home').data.nextMatch;
+    const weAreHome = !!(nmNext && nmNext.home && String(nmNext.home.id) === clubId);
+    const savedXI = expected && Array.isArray(expected.xi) && expected.xi.filter(x => x.rec).length >= 9 ? expected.xi : null; // their real XI's rec/routine, straight from the match page
+    const oppPlayers = savedXI || (oppXI ? oppXI.lineup.map(l => l.player) : []);
+    const predictedGD = predictGoalDiff(model, myXI.lineup.filter(l => l.player).map(l => l.player), oppPlayers, weAreHome);
+    let evidence = { n: model.n, ready: model.ready };
+    if (predictedGD != null) {
+      const context = contextOf(predictedGD);
+      const m = evidencePick(model, 'ment', context, mentality), st = evidencePick(model, 'style', context, style);
+      if (m.switched) { reasoning.push(`Results evidence: as ${context === 'underdog' ? 'the underdog' : context === 'favourite' ? 'favourite' : 'an even match'}, ${MENTALITY[m.value]} beat ${MENTALITY[mentality]} by ${m.gain.toFixed(2)} goals/match against expectation in this division → ${MENTALITY[m.value]}.`); mentality = m.value; }
+      if (st.switched) { reasoning.push(`Results evidence: ${ATT_STYLE[st.value]} beat ${ATT_STYLE[style]} by ${st.gain.toFixed(2)} goals/match against expectation → ${ATT_STYLE[st.value]}.`); style = st.value; }
+      evidence = { n: model.n, ready: true, context, coef: model.coef, rmse: model.rmse, teamFactor: model.teamFactor, mentality: m, style: st };
+    }
+    return { mentality, style, focus, reasoning, counter: fcDiff.counter, difficulty: fcDiff.difficulty, predictedGD, evidence, weAreHome };
   }
 
   // Conditional orders in TM's own codes (CLAUDE.md "Tactics page"): one event + one score
@@ -2798,7 +2845,7 @@
         id: String(p.player_id), name: p.name, fp: p.fp, age: Number(p.age) + (Number(p.months) || 0) / 12,
         asi: Number(String(p.skill_index).replace(/,/g, '')), routine: Number(p.routine) || 0,
         ban: p.banned ? '1' : '0', inj: String(p.injury) === '0' ? null : p.injury,
-        banRisk: /yellow_card/.test(p.status_no_check || ''), skills, plot: [],
+        banRisk: /yellow_card/.test(p.status_no_check || ''), rec: Number(p.rec_sort) || 0, skills, plot: [],
       };
     });
   }
@@ -2993,10 +3040,180 @@
       const mismatches = tacticMismatches(target, await readSavedTactic());
       if (mismatches.length) return autopilotLog(`Saved v ${vs}, but these didn't stick: ${mismatches.join(', ')}.`, false, { matchId });
       markDone();
+      recordPrediction(plan);
       return autopilotLog(changes.length ? `Applied v ${vs}: ${changes.length} change(s), verified.` : `Tactic v ${vs} already matched the plan.`, true, { matchId, changes });
     } catch (e) {
       return autopilotLog('Autopilot failed: ' + e.message, false);
     }
+  }
+
+  /* ============================================================
+   *  SECTION 5I — LEARNING FROM RESULTS  (match bank + fitted result model)
+   *  ------------------------------------------------------------
+   *  Crawls your division's played matches (both XIs' TM rec + routine, each
+   *  side's mentality/style/focus, the score) and fits ONE goal-difference model
+   *  on strength. Each setting is then judged by how sides using it did against
+   *  what the strength gap predicted, per context (underdog / even / favourite).
+   *  A setting replaces the heuristic only when the data clearly favours it.
+   *  Observational data: teams pick settings for reasons, so effects are
+   *  associations, and the UI says so.
+   * ============================================================ */
+
+  const MATCH_BANK_CAP = 600;
+  const LEARN_MIN_MATCHES = 30;  // below this the model isn't fitted at all
+  const LEARN_MIN_SAMPLES = 12;  // per setting, per context, before it can override
+  const LEARN_CRAWL_GAP_MS = 20 * 3600e3;
+
+  function matchSide(md, lineup, side) {
+    const starters = Object.values(lineup || {}).filter(p => p && p.position && !String(p.position).toLowerCase().includes('sub'));
+    const avg = k => starters.length ? starters.reduce((a, p) => a + (parseFloat(p[k]) || 0), 0) / starters.length : null;
+    const pick = k => { const v = md[k]; const x = v && typeof v === 'object' ? v[side] : null; return x == null || x === '' ? null : Number(x); };
+    const style = pick('attacking_style');
+    return { n: starters.length, rec: avg('rec'), rou: avg('routine'), ment: pick('mentality'), style: style === 0 ? 1 : style, focus: pick('focus_side') }; // style 0 = Balanced, as fetchNextMatchExpected treats it
+  }
+
+  let crawling = false;
+  async function crawlDivision(maxNew, onProgress) {
+    if (crawling) throw new Error('already reading match reports');
+    crawling = true;
+    try { return await crawlDivisionOnce(maxNew, onProgress); } finally { crawling = false; }
+  }
+  async function crawlDivisionOnce(maxNew, onProgress) {
+    const home = getSlice('home');
+    const path = home && home.data && home.data.nextMatch && home.data.nextMatch.leaguePath;
+    const lp = path && path.match(/\/league\/([a-z]+)\/(\d+)\/(\d+)/i);
+    if (!lp) throw new Error('league unknown — open the Home page once');
+    const res = await fetch('/ajax/fixtures.ajax.php', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `type=league&var1=${lp[1]}&var2=${lp[2]}&var3=${lp[3]}` });
+    const fx = JSON.parse(await res.text()) || {};
+    const played = [];
+    Object.values(fx).forEach(mo => (mo && mo.matches || []).forEach(x => { if (x.result && /^\d+-\d+$/.test(x.result)) played.push(x); }));
+    const bank = (getSlice('matchBank') || { data: {} }).data || {};
+    const todo = played.filter(x => !bank[x.id]).slice(0, maxNew);
+    let done = 0;
+    for (const x of todo) {
+      onProgress && onProgress(++done, todo.length);
+      try {
+        const data = await fetchMatchJson(x.id);
+        const md = (data && data.match_data) || {};
+        const [hg, ag] = x.result.split('-').map(Number);
+        const h = matchSide(md, data && data.lineup && data.lineup.home, 'home');
+        const a = matchSide(md, data && data.lineup && data.lineup.away, 'away');
+        bank[x.id] = (h.n >= 9 && a.n >= 9 && h.rec && a.rec)
+          ? { d: x.date, hid: String(x.hometeam), aid: String(x.awayteam), h: { ...h, g: hg }, a: { ...a, g: ag } }
+          : { d: x.date, skip: true };
+      } catch (e) { console.warn('TM Advisor: match crawl failed', x.id, e); }
+      await sleep(150);
+    }
+    Object.keys(bank).sort((p, q) => String(bank[q].d).localeCompare(String(bank[p].d))).slice(MATCH_BANK_CAP).forEach(id => delete bank[id]);
+    setSlice('matchBank', bank);
+    return { added: todo.length, total: Object.keys(bank).length, remaining: played.filter(x => !bank[x.id]).length };
+  }
+
+  // Daily, read-only, capped: the bank grows by itself whenever you play.
+  async function backgroundCrawl() {
+    const st = getSlice('matchBankCrawl');
+    if (crawling || (st && now() - st.t < LEARN_CRAWL_GAP_MS)) return;
+    setSlice('matchBankCrawl', { claimed: true });
+    try { setSlice('matchBankCrawl', await crawlDivision(60)); } catch (e) { console.warn('TM Advisor: background crawl', e); }
+  }
+
+  // Strength inputs: the gap in average TM rec, and in log routine (routine's own R5 bonus is a
+  // saturating curve, Section 2B, so log keeps one veteran-heavy XI from dominating).
+  const strengthRow = (s, o) => [1, s.rec - o.rec, Math.log1p(s.rou || 0) - Math.log1p(o.rou || 0)];
+  function solveLinear(A, b) {
+    const n = b.length, M = A.map((r, i) => r.concat(b[i]));
+    for (let c = 0; c < n; c++) {
+      let p = c;
+      for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+      if (Math.abs(M[p][c]) < 1e-9) return null;
+      [M[c], M[p]] = [M[p], M[c]];
+      for (let r = 0; r < n; r++) {
+        if (r === c) continue;
+        const f = M[r][c] / M[c][c];
+        for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k];
+      }
+    }
+    return M.map((r, i) => r[n] / r[i]);
+  }
+
+  // GD(home view) = c0 + c1·Δrec + c2·Δlog-routine; c0 is home advantage. Least squares.
+  function fitResultModel() {
+    const games = Object.values((getSlice('matchBank') || { data: {} }).data || {}).filter(m => !m.skip);
+    if (games.length < LEARN_MIN_MATCHES) return { n: games.length, ready: false };
+    const X = games.map(m => strengthRow(m.h, m.a)), y = games.map(m => m.h.g - m.a.g);
+    const XtX = [0, 1, 2].map(r => [0, 1, 2].map(c => X.reduce((a, x) => a + x[r] * x[c], 0)));
+    const Xty = [0, 1, 2].map(r => X.reduce((a, x, i) => a + x[r] * y[i], 0));
+    const coef = solveLinear(XtX, Xty);
+    if (!coef) return { n: games.length, ready: false };
+    const predict = x => coef[0] * x[0] + coef[1] * x[1] + coef[2] * x[2];
+    const samples = [];
+    let sq = 0;
+    games.forEach((m, i) => {
+      const p = predict(X[i]), e = y[i] - p;
+      sq += e * e;
+      samples.push({ s: m.h, team: m.hid, exp: p, res: e }, { s: m.a, team: m.aid, exp: -p, res: -e }); // a sample per side
+    });
+    // How far OUR results run above/below what our ratings predict. Kept out of the setting
+    // effects: we played one setting all season, so our own over-performance would otherwise
+    // be credited to that setting. Shrunk toward 0 (k = 10 matches) so a few games can't swing it.
+    const own = samples.filter(x => x.team === clubId).map(x => x.res);
+    const ownMean = own.length ? own.reduce((a, b) => a + b, 0) / own.length : 0;
+    const teamFactor = { n: own.length, raw: ownMean, shrunk: ownMean * own.length / (own.length + 10) };
+    return { n: games.length, ready: true, coef, rmse: Math.sqrt(sq / games.length), samples, teamFactor };
+  }
+
+  // Own heuristic: within ¾ of a goal either way counts as an even match.
+  const contextOf = gd => gd < -0.75 ? 'underdog' : gd > 0.75 ? 'favourite' : 'even';
+
+  function settingEffects(model, field, context) {
+    const groups = {};
+    model.samples.forEach(x => { const v = x.s[field]; if (v && x.team !== clubId && contextOf(x.exp) === context) (groups[v] = groups[v] || []).push(x.res); });
+    return Object.entries(groups).map(([v, r]) => {
+      const mean = r.reduce((a, b) => a + b, 0) / r.length;
+      const sd = Math.sqrt(r.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, r.length - 1));
+      return { value: Number(v), n: r.length, mean, se: sd / Math.sqrt(r.length) };
+    }).sort((a, b) => b.mean - a.mean);
+  }
+
+  // Switch from the heuristic only when the best-supported setting beats it by more than
+  // 1.5 standard errors of the difference — with a few hundred matches most gaps are noise.
+  function evidencePick(model, field, context, heuristic) {
+    const rows = settingEffects(model, field, context);
+    const ok = rows.filter(r => r.n >= LEARN_MIN_SAMPLES);
+    const best = ok[0], cur = rows.find(r => r.value === heuristic);
+    if (!best || best.value === heuristic || !cur || cur.n < LEARN_MIN_SAMPLES) return { value: heuristic, rows, switched: false };
+    const gain = best.mean - cur.mean;
+    return gain > 1.5 * Math.sqrt(best.se ** 2 + cur.se ** 2) ? { value: best.value, rows, switched: true, gain } : { value: heuristic, rows, switched: false };
+  }
+
+  const avgOf = (arr, k) => { const v = arr.map(x => Number(x[k])).filter(x => !isNaN(x) && x > 0); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+  // Our expected goal difference v the next opponent, from the fitted model.
+  function predictGoalDiff(model, myPlayers, oppPlayers, weAreHome) {
+    const me = { rec: avgOf(myPlayers, 'rec'), rou: avgOf(myPlayers, 'routine') };
+    const them = { rec: avgOf(oppPlayers, 'rec'), rou: avgOf(oppPlayers, 'routine') };
+    if (!model.ready || me.rec == null || them.rec == null) return null;
+    const x = strengthRow(me, them);
+    return (weAreHome ? model.coef[0] : -model.coef[0]) + model.coef[1] * x[1] + model.coef[2] * x[2] + model.teamFactor.shrunk;
+  }
+
+  function recordPrediction(plan) {
+    const nm = getSlice('home') && getSlice('home').data && getSlice('home').data.nextMatch;
+    const matchId = nm && nm.matchUrl ? (nm.matchUrl.match(/\/matches\/(\d+)/) || [])[1] : null;
+    if (!matchId || plan.settings.predictedGD == null) return;
+    const all = (getSlice('predictions') || { data: {} }).data || {};
+    all[matchId] = { t: now(), gd: plan.settings.predictedGD, ment: plan.settings.mentality, style: plan.settings.style, focus: plan.settings.focus };
+    const keep = Object.entries(all).sort((a, b) => b[1].t - a[1].t).slice(0, 60);
+    setSlice('predictions', Object.fromEntries(keep));
+  }
+  // Predictions whose match is now in the bank, graded from our side.
+  function gradedPredictions() {
+    const preds = (getSlice('predictions') || { data: {} }).data || {};
+    const bank = (getSlice('matchBank') || { data: {} }).data || {};
+    return Object.entries(preds).filter(([id]) => bank[id] && !bank[id].skip).map(([id, p]) => {
+      const m = bank[id], home = m.hid === clubId;
+      const actual = home ? m.h.g - m.a.g : m.a.g - m.h.g;
+      return { id, ...p, actual, score: home ? `${m.h.g}-${m.a.g}` : `${m.a.g}-${m.h.g}`, d: m.d };
+    }).sort((a, b) => String(b.d).localeCompare(String(a.d)));
   }
 
   /* ============================================================
@@ -3566,6 +3783,24 @@
           </div>`).join('')}
       </div>` : '';
 
+    const ev = settings.evidence || {};
+    const signed = v => (v >= 0 ? '+' : '') + v.toFixed(1);
+    const effectRows = (pick, names) => pick.rows.slice(0, 4).map(x => `<div class="tma-row"><span>${names[x.value] || x.value}${x.value === pick.value ? ' ✓' : ''}</span><span class="tma-mini">${x.mean >= 0 ? '+' : ''}${x.mean.toFixed(2)} ±${x.se.toFixed(2)} goals · n ${x.n}${x.n < LEARN_MIN_SAMPLES ? ' (too few)' : ''}</span></div>`).join('');
+    const graded = gradedPredictions().slice(0, 5);
+    const learnHtml = `
+      <div class="tma-card">
+        <h4>What the results say <span class="tma-badge">${ev.n || 0} division matches</span></h4>
+        ${!ev.ready ? `<div class="tma-mini">Needs ${LEARN_MIN_MATCHES}+ played matches from your division before it judges anything — until then mentality and style above are heuristics.</div>` : `
+          <div class="tma-mini" style="margin-bottom:6px;">Fitted on your division: +1★ of average XI rating ≈ ${signed(ev.coef[1])} goals, home ≈ ${signed(ev.coef[0])}, typical miss ±${ev.rmse.toFixed(1)} goals.${ev.teamFactor && ev.teamFactor.n ? ` You've played ${signed(ev.teamFactor.raw)} goals/match vs your ratings (${ev.teamFactor.n} matches; ${signed(ev.teamFactor.shrunk)} counted).` : ''}</div>
+          ${settings.predictedGD != null ? `<div class="tma-row"><span>Expected (strength only, ${settings.weAreHome ? 'home' : 'away'})</span><span class="tma-goodval">${signed(settings.predictedGD)} goals · ${ev.context}</span></div>` : ''}
+          ${ev.mentality ? `<div class="tma-mini" style="margin:6px 0 2px;">Mentality — sides in your situation (${ev.context}), goals vs expectation:</div>${effectRows(ev.mentality, MENTALITY)}` : ''}
+          ${ev.style ? `<div class="tma-mini" style="margin:6px 0 2px;">Attacking style:</div>${effectRows(ev.style, ATT_STYLE)}` : ''}
+          <div class="tma-mini" style="margin-top:6px;">Other teams' matches only, and associations rather than experiments — a setting only overrides the heuristic when it clearly beats it.</div>`}
+        ${graded.length ? `<div class="tma-mini" style="margin:8px 0 2px;">How our predictions did:</div>${graded.map(g => `<div class="tma-row"><span>${esc(g.d)} · ${esc(g.score)}</span><span class="tma-mini">predicted ${signed(g.gd)} · actual ${signed(g.actual)}</span></div>`).join('')}` : ''}
+        <button class="tma-btn secondary" id="tma-learn">Learn from more matches</button>
+        <div class="tma-progress" id="tma-learn-status"></div>
+      </div>`;
+
     body.innerHTML = `
       ${applyCardHtml(squad)}
       <div class="tma-card">
@@ -3580,7 +3815,9 @@
         <div class="tma-row"><span>Attacking Style</span><span class="tma-goodval">${ATT_STYLE[settings.style]}</span></div>
         <div class="tma-row"><span>Focus Side</span><span class="tma-goodval">${FOCUS_SIDE[settings.focus]}</span></div>
         ${settings.counter ? `<div class="tma-mini" style="margin-top:6px;">⚔ ${esc(settings.counter.note)}</div>` : ''}
+        <details style="margin-top:6px;"><summary class="tma-mini" style="cursor:pointer;">Why these settings</summary>${settings.reasoning.map(r => `<div class="tma-reason">${esc(r)}</div>`).join('')}</details>
       </div>
+      ${learnHtml}
       <div class="tma-card">
         <h4>Captain &amp; Set-Piece Takers</h4>
         ${rolesHtml}
@@ -3599,6 +3836,15 @@
       ${trainingHtml}
     `;
     bindApplyCard(plan);
+    bindBtn('tma-learn', async () => {
+      const st = document.getElementById('tma-learn-status'), btn = document.getElementById('tma-learn');
+      btn.disabled = true;
+      try {
+        const r = await crawlDivision(400, (i, n) => { st.textContent = `Reading match report ${i} / ${n}…`; });
+        setSlice('matchBankCrawl', r);
+      } catch (e) { st.textContent = 'Could not crawl: ' + e.message; btn.disabled = false; return; }
+      renderTactics();
+    });
   }
 
   // Mentality, focus and the orders all hinge on the opponent, so Apply is only offered once
@@ -3672,7 +3918,7 @@
       await refreshAll((key, st) => { status.textContent = 'Scanning: ' + key + ' ' + st; });
       renderTactics();
     }));
-    bindBtn('tma-apply', run('Applying plan', () => saveTacticAndVerify(state, 'Plan applied', true)));
+    bindBtn('tma-apply', run('Applying plan', () => { recordPrediction(plan); return saveTacticAndVerify(state, 'Plan applied', true); }));
     bindBtn('tma-undo', run('Undoing', () => {
       const b = getSlice('tacticsBackup').data;
       return saveTacticAndVerify({ ...b, orders: b.orders.map(o => Object.fromEntries(ORDER_FIELDS.map(f => [f, o[f]]))) }, 'Undo', false);
@@ -4049,7 +4295,10 @@
     autoCaptureCurrentPage();
     if (location.pathname.startsWith('/tactics')) verifyPendingApply();
     // Top window only (not TM's iframes), after the page has settled.
-    if (window.top === window) setTimeout(() => { runAutopilot().catch(e => console.warn('TM Advisor: autopilot', e)); }, 4000);
+    if (window.top === window) {
+      setTimeout(() => { runAutopilot().catch(e => console.warn('TM Advisor: autopilot', e)); }, 4000);
+      setTimeout(() => { backgroundCrawl(); }, 15000); // after the autopilot, never competing with it
+    }
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') boot();
