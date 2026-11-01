@@ -28,11 +28,11 @@ TM Advisor answers all of these — automatically, on every page — using only 
 
 ### 🧠 Tactics Engine
 
-- **Best XI picker** — evaluates formations (4-4-2, 4-5-1, 3-5-2, 4-3-3) using position-aware R5 scores. Penalises players played out of position so you see who *actually* fits where.
+- **Best XI picker** — rates every player in every slot with that slot's own R5 weights, applies TM's own out-of-position penalty (10% per step, read from the game's tactics code), and finds the optimal XI across 11 formations. Tells you when formations are a near-tie, so you know the shape barely matters and who plays where does.
 - **Mentality & style** — compares your squad strength vs your opponent's as a percentage, then recommends mentality, attacking style, and focus side with reasoning you can verify.
-- **Formation counters** — when the opponent's formation is known, flags if the community meta suggests a formation that tends to counter it (clearly marked as a nudge on top of the R5 pick, never a hard override).
+- **Formation counters** — when the opponent's formation is known, shows the community's counter suggestion for reference only (unverified, never used to pick the formation).
 - **Fixture difficulty** — rates each upcoming match Comfortable / Even / Tough from the opponent's best-XI R5, so you know which weeks deserve real prep.
-- **Captain & set pieces** — picks captain (highest ASI), corner/free-kick/penalty takers based on the specific skills each role needs.
+- **Captain & set pieces** — picked from the XI you'll actually field: takers ranked by the same skill sums the R5 formula uses for its set-piece bonuses; captain = most experienced (highest routine, a labelled heuristic).
 - **Conditional orders** — generates 5 position-aware substitution orders with exact timing and what to assign on the TM sub screen.
 - **Opponent scouting** — reads the next match's expected formation and tactics from the game's own data. Also compiles the opponent's usual formation/mentality/style from their last 5 matches.
 

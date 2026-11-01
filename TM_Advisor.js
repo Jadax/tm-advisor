@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.7.2
+// @version      3.8.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -42,8 +42,9 @@
  *                                       goal/card/injury timeline)
  *  ⓘ recruit verdicts are graded (STAR/KEEP/MAYBE/RELEASE) with SI-vs-age
  *    and peak-reach detail in the row tooltip
- *   SECTION 5  TACTICS ENGINE        (formation + settings picker;
- *                                       position-aware substitution orders)
+ *   SECTION 5  TACTICS ENGINE        (per-slot R5 x TM's own position penalty,
+ *                                       optimal XI per formation, buildMatchPlan:
+ *                                       XI/bench/roles/settings/cond orders)
  *   SECTION 5B YOUTH FINDER          (transfer-list-only talent shortlist)
  *   SECTION 5C SENIOR TARGETS        (transfer-list-only, position-need)
  *   SECTION 5D SPENDING GUIDANCE     (cash/wage-aware transfer budget)
@@ -1825,24 +1826,76 @@
     return 'C';
   }
 
-  // A 4-4-2-ish flexible formation slot template based on typical TM formations.
-  // We pick the formation that best fits the available R5-strength distribution.
-  // Rows top-to-bottom: GK, Defence, Midfield, Attack — used both for slot-matching and
-  // for rendering an actual pitch-shaped layout instead of a flat grid.
-  const FORMATION_ROWS = {
-    '4-4-2': [['GK'], ['D-L', 'D-C', 'D-C', 'D-R'], ['M-L', 'M-C', 'M-C', 'M-R'], ['F', 'F']],
-    '4-5-1': [['GK'], ['D-L', 'D-C', 'D-C', 'D-R'], ['M-L', 'M-C', 'M-C', 'M-R', 'OM-C'], ['F']],
-    '3-5-2': [['GK'], ['D-C', 'D-C', 'D-C'], ['M-L', 'DM-C', 'M-C', 'M-C', 'M-R'], ['F', 'F']],
-    '4-3-3': [['GK'], ['D-L', 'D-C', 'D-C', 'D-R'], ['DM-C', 'M-C', 'M-C'], ['OM-L', 'F', 'OM-R']],
-    // The other 3-back shapes the current meta plays (3-1-4-2, 3-2-3-2, 3-4-3). Slot names
-    // reuse the same bucket-suffix vocabulary as the four originals, so positionPenalty
-    // multipliers and pitch rendering work unchanged. Exact in-game slot layouts may differ
-    // slightly from these templates - treat these three as approximations of the shape.
-    '3-1-4-2': [['GK'], ['D-C', 'D-C', 'D-C'], ['DM-C'], ['M-L', 'M-C', 'M-C', 'M-R'], ['F', 'F']],
-    '3-2-3-2': [['GK'], ['D-C', 'D-C', 'D-C'], ['DM-C', 'DM-C'], ['M-L', 'M-C', 'M-R'], ['F', 'F']],
-    '3-4-3': [['GK'], ['D-C', 'D-C', 'D-C'], ['M-L', 'M-C', 'M-C', 'M-R'], ['F', 'F', 'F']],
+  // Formations on TM's own slot keys (CLAUDE.md "Tactics page"), so a recommended XI can be
+  // posted to /tactics/ exactly as shown. dmc/omc are real keys (seen in match line-ups).
+  const FORMATIONS = {
+    '4-4-2': 'gk dl dcl dcr dr ml mcl mcr mr fcl fcr',
+    '4-5-1': 'gk dl dcl dcr dr ml mcl mc mcr mr fc',
+    '4-3-3': 'gk dl dcl dcr dr mcl mc mcr oml omr fc',
+    '4-2-3-1': 'gk dl dcl dcr dr dmcl dmcr oml omc omr fc',
+    '4-1-4-1': 'gk dl dcl dcr dr dmc ml mcl mcr mr fc',
+    '4-2-2-2': 'gk dl dcl dcr dr dmcl dmcr oml omr fcl fcr',
+    '3-5-2': 'gk dcl dc dcr ml mcl mc mcr mr fcl fcr',
+    '3-4-3': 'gk dcl dc dcr ml mcl mcr mr fcl fc fcr',
+    '3-1-4-2': 'gk dcl dc dcr dmc ml mcl mcr mr fcl fcr',
+    '5-3-2': 'gk dl dcl dc dcr dr mcl mc mcr fcl fcr',
+    '5-4-1': 'gk dl dcl dc dcr dr ml mcl mcr mr fc',
   };
-  const FORMATIONS = Object.fromEntries(Object.entries(FORMATION_ROWS).map(([k, rows]) => [k, rows.flat()]));
+  // TM's position number per slot key (the tactics page's `position_key`).
+  const SLOT_NUM = { gk: 0, dl: 1, dcl: 2, dc: 3, dcr: 4, dr: 5, dml: 6, dmcl: 7, dmc: 8, dmcr: 9, dmr: 10,
+    ml: 11, mcl: 12, mc: 13, mcr: 14, mr: 15, oml: 16, omcl: 17, omc: 18, omcr: 19, omr: 20, fcl: 21, fc: 22, fcr: 23 };
+  const slotLineOf = (n) => n === 0 ? 'GK' : n <= 5 ? 'D' : n <= 10 ? 'DM' : n <= 15 ? 'M' : n <= 20 ? 'OM' : 'F';
+  const slotSideOf = (n) => [1, 6, 11, 16].includes(n) ? 'L' : [5, 10, 15, 20].includes(n) ? 'R' : 'C';
+  const slotBucket = (key) => slotLineOf(SLOT_NUM[key]);
+  const slotSide = (key) => slotSideOf(SLOT_NUM[key]);
+
+  // Port of TM's own out-of-position penalty, retPlayerMood/retPlayerMoodCalc in
+  // js/tactics_v2.js: 0-4 steps of 10% each. Its comments: side C<->L/R 20%, L<->R 10%;
+  // each line away 10% (D at F 40%); a GK outfield or an outfielder in goal = 4.
+  const TM_LINE_PENALTY = {
+    D: { D: 0, DM: 1, M: 2, OM: 3, F: 4 },
+    DM: { DM: 0, D: 1, M: 1, OM: 2, F: 3 },
+    M: { M: 0, DM: 1, OM: 1, D: 2, F: 2 },
+    OM: { OM: 0, M: 1, F: 1, DM: 2, D: 3 },
+    F: { F: 0, OM: 1, M: 2, DM: 3, D: 4 },
+  };
+  function tmMoodCalc(line, side, n) {
+    const placedSide = slotSideOf(n);
+    let pen = side === placedSide ? 0 : (side === 'C' || placedSide === 'C') ? 2 : 1;
+    pen += TM_LINE_PENALTY[slotLineOf(n)][line] || 0;
+    return Math.min(pen, 4);
+  }
+  function tmPositionPenalty(fp, n) {
+    let fav = String(fp || '').trim();
+    if (fav.includes(', F')) { const t = fav.split(' '); fav = t[0] + '/F ' + t[1].split(',')[0]; } // "OM C, F" -> "OM/F C", as TM does
+    if (fav === 'GK' || n === 0) return (fav === 'GK' && n === 0) ? 0 : 4;
+    const parts = fav.split(' ');
+    const lines = parts[0].split('/');
+    if (fav === 'F') return tmMoodCalc('F', 'C', n);
+    if (lines.includes('F')) return Math.min(tmMoodCalc('F', 'C', n), tmMoodCalc(lines[0], parts[1], n));
+    if (lines.length > 1) return Math.min(tmMoodCalc(lines[0], parts[1], n), tmMoodCalc(lines[1], parts[1], n));
+    return Math.min(...(parts[1] || 'C').split('').map(s => tmMoodCalc(parts[0], s, n)));
+  }
+
+  // A player's value in one slot = R5 on THAT slot's weights × TM's out-of-position penalty.
+  // R5 is per-position: a DC at DMC is scored on the DMC weights, not on his DC rating.
+  // Players without raw skills (star-estimate opponents) fall back to their single _r5.
+  function slotRating(p, key) {
+    const isGK = bucketFor(p.fp) === 'GK';
+    if ((key === 'gk') !== isGK) return -Infinity;
+    const posIdx = getPositionIndex(key);
+    if (!p._slotR5) Object.defineProperty(p, '_slotR5', { value: {}, enumerable: false });
+    if (p._slotR5[posIdx] === undefined) {
+      const asi = Number(String(p.asi == null ? '' : p.asi).replace(/,/g, ''));
+      let r5 = null;
+      if (p.skills && asi) {
+        const arr = isGK ? gkSkillArray(p.skills) : outfieldSkillArray(p.skills);
+        if (!arr.some(isNaN)) r5 = calculateR5(posIdx, arr, asi, p.routine || 0);
+      }
+      p._slotR5[posIdx] = r5 != null ? r5 : (Number(ensureR5(p)) || 0);
+    }
+    return p._slotR5[posIdx] * (1 - 0.1 * tmPositionPenalty(p.fp, SLOT_NUM[key]));
+  }
 
   // ---- Formation counters (community-sourced meta) ----
   // A qualitative "which formation tends to beat which" map. Meta direction (user-observed
@@ -1879,169 +1932,117 @@
       counter = {
         for: oppFormation,
         suggested: FORMATION_COUNTERS[oppFormation][0],
-        note: `community meta: ${FORMATION_COUNTERS[oppFormation][0]} tends to counter ${oppFormation}. If the auto-counter pick below isn't already that formation, it means our best META XI is decisively stronger (more than +3%) and stays the safer choice.`,
+        note: `community meta: ${FORMATION_COUNTERS[oppFormation][0]} tends to counter ${oppFormation}. Unverified community claim — shown for reference only, NOT used to pick the formation.`,
       };
     }
     return { counter, difficulty: fixtureDifficulty(myAvg, oppAvg) };
   }
 
-  // ---- Position-penalty system ----
-  // Real off-position penalties matter: a central midfielder shoved out to M-R shouldn't
-  // just silently count at full strength (or worse, be excluded from side-strength maths
-  // entirely, which was the root cause of the earlier "Right R5 0.0" bug). We apply a
-  // multiplicative penalty based on how far the player's own bucket/side (from bucketFor/
-  // sideFor, Section 5) sits from the slot being filled, using the same GK→D→DM→M→OM→F
-  // ordering already used for the pitch rows.
-  const BUCKET_ORDER = ['D', 'DM', 'M', 'OM', 'F'];
-  function positionPenaltyMultiplier(playerBucket, playerSide, slotBucket, slotSide) {
-    if (slotBucket === 'GK' || playerBucket === 'GK') return playerBucket === slotBucket ? 1.0 : 0.1;
-    const pIdx = BUCKET_ORDER.indexOf(playerBucket), sIdx = BUCKET_ORDER.indexOf(slotBucket);
-    const dist = (pIdx >= 0 && sIdx >= 0) ? Math.abs(pIdx - sIdx) : 3;
-    const base = dist === 0 ? 1.0 : dist === 1 ? 0.85 : dist === 2 ? 0.65 : 0.45;
-    let sideFactor = 1.0;
-    if (slotSide) {
-      if (playerSide === slotSide) sideFactor = 1.0;
-      else if (playerSide === 'C') sideFactor = 0.95;
-      else sideFactor = 0.9; // opposite named side (e.g. trained L, played R)
-    }
-    return base * sideFactor;
-  }
-
-  // NOTE: opponent formation is NOT guessed from squad strength. It comes only from hard
-  // data — the next-match page's expected line-up (fetchNextMatchExpected) and their actual
-  // last-N line-ups (buildOpponentScoutingReport). See Section 3.
-
-  // How strong is the opponent's attack, on average, across their forwards + attacking
-  // mids? Used to scale how much a defender's Marking/Tackling should matter beyond raw
-  // R5 — against a weak attack it barely matters, against a strong one it should.
-  function opponentAttackThreat(opponentData) {
-    if (!opponentData || !opponentData.players) return null;
-    const attackers = opponentData.players.filter(p => { const b = bucketFor(p.fp); return b === 'F' || b === 'OM'; });
-    const vals = attackers.map(p => p._r5).filter(v => typeof v === 'number' && !isNaN(v));
-    return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
-  }
-
-  function pickBestXI(players, formationKey, opponentData) {
-    const slots = FORMATIONS[formationKey];
-    const used = new Set();
-    const lineup = [];
-    const attackThreat = opponentAttackThreat(opponentData);
-    // Greedy: for each slot, pick the unused player with the highest penalised R5 — plus,
-    // for defensive slots, a matchup bonus scaled by the opponent's attacking strength so a
-    // strong marker/tackler is favoured specifically against a dangerous attack, not just
-    // picked on raw R5 in isolation.
-    slots.forEach(slot => {
-      const [slotBucket, slotSide] = slot.split('-');
-      let best = null, bestScore = -Infinity, bestPenalty = 0;
-      players.forEach(p => {
-        if (used.has(p.id)) return;
-        const pb = bucketFor(p.fp), ps = sideFor(p.fp);
-        if ((slotBucket === 'GK') !== (pb === 'GK')) return; // GKs only in goal, outfielders never in goal
-        const mult = positionPenaltyMultiplier(pb, ps, slotBucket, slotSide);
-        let score = (p._r5 || 0) * mult;
-        if (attackThreat != null && (slotBucket === 'D' || slotBucket === 'DM') && p.skills) {
-          const markTac = ((Number(p.skills.mar) || 0) + (Number(p.skills.tac) || 0)) / 2;
-          score += markTac * (attackThreat / 100) * 0.5; // bounded, secondary factor — R5 still dominates
+  // Hungarian assignment on score[slot][player] (maximised). The old greedy slot-by-slot fill
+  // let the first slot grab a player who was worth more somewhere else.
+  function assignOptimal(score) {
+    const n = score.length, m = score[0].length;
+    const u = Array(n + 1).fill(0), v = Array(m + 1).fill(0), p = Array(m + 1).fill(0), way = Array(m + 1).fill(0);
+    for (let i = 1; i <= n; i++) {
+      p[0] = i;
+      let j0 = 0;
+      const minv = Array(m + 1).fill(Infinity), used = Array(m + 1).fill(false);
+      do {
+        used[j0] = true;
+        const i0 = p[j0];
+        let d = Infinity, j1 = 0;
+        for (let j = 1; j <= m; j++) {
+          if (used[j]) continue;
+          const c = -score[i0 - 1][j - 1] - u[i0] - v[j];
+          if (c < minv[j]) { minv[j] = c; way[j] = j0; }
+          if (minv[j] < d) { d = minv[j]; j1 = j; }
         }
-        if (score > bestScore) { bestScore = score; best = p; bestPenalty = (p._r5 || 0) - score; }
-      });
-      if (best) {
-        used.add(best.id);
-        lineup.push({ slot, player: best, effectiveR5: bestScore, penalty: bestPenalty });
-      } else {
-        lineup.push({ slot, player: null, effectiveR5: 0, penalty: 0 });
-      }
-    });
-    const subs = players.filter(p => !used.has(p.id)).sort((a, b) => b._r5 - a._r5).slice(0, 7);
-    const totalRec = lineup.reduce((s, l) => s + (l.effectiveR5 || 0), 0);
-    return { lineup, subs, totalRec, formation: formationKey };
+        for (let j = 0; j <= m; j++) {
+          if (used[j]) { u[p[j]] += d; v[j] -= d; } else minv[j] -= d;
+        }
+        j0 = j1;
+      } while (p[j0] !== 0);
+      do { const j1 = way[j0]; p[j0] = p[j1]; j0 = j1; } while (j0);
+    }
+    const out = Array(n).fill(-1);
+    for (let j = 1; j <= m; j++) if (p[j]) out[p[j] - 1] = j - 1;
+    return out;
   }
 
-  // Community consensus (per user's own match-history observation) is that all 3-back
-  // variants are currently over-performing relative to what the match engine's public
-  // numbers would suggest. We apply a small, clearly-labelled nudge rather than silently
-  // overriding pure R5 math - remove entries here if the meta shifts back.
-  const FORMATION_BIAS = { '3-5-2': 1.04, '3-1-4-2': 1.04, '3-2-3-2': 1.04, '3-4-3': 1.04 };
-
-  function bestFormation(players, opponentData, oppFormation) {
-    players.forEach(ensureR5); // idempotent: won't overwrite star-estimate R5s
-    // Auto-counter: once the opponent has been scanned (expected line-up from the match
-    // page, else their most-recent formation), any formation listed as a counter for theirs
-    // gets a +3% multiplier. The meta FORMATION_BIAS (3-backs) stacks on top, so outside of
-    // a real R5 mismatch the pick lands on a meta formation that also counters smaller
-    // spreads first. The nudge only flips the pick within a ~3% strength band - we never
-    // override a decisively stronger XI. 3% is a heuristic band, not a game formula.
-    const counterSet = (oppFormation && FORMATION_COUNTERS[oppFormation]) || null;
-    let best = null;
-    Object.keys(FORMATIONS).forEach(key => {
-      const res = pickBestXI(players, key, opponentData);
-      const countered = !!counterSet && counterSet.includes(key);
-      const biased = res.totalRec * (FORMATION_BIAS[key] || 1) * (countered ? 1.03 : 1);
-      res._countered = countered;
-      if (!best || biased > best._biasedRec) { res._biasedRec = biased; best = res; }
+  const NO_FIT = -1e6;
+  function pickBestXI(players, formationKey) {
+    const keys = FORMATIONS[formationKey].split(' ');
+    const score = keys.map(k => players.map(p => { const v = slotRating(p, k); return isFinite(v) ? v : NO_FIT; }));
+    while (score[0].length < keys.length) score.forEach(r => r.push(NO_FIT)); // fewer players than slots
+    const pick = assignOptimal(score);
+    const lineup = keys.map((k, i) => {
+      const p = players[pick[i]], v = p ? score[i][pick[i]] : NO_FIT;
+      const ok = p && v > NO_FIT / 2;
+      return { slot: k, bucket: slotBucket(k), side: slotSide(k), player: ok ? p : null, effectiveR5: ok ? v : 0, penalty: ok ? tmPositionPenalty(p.fp, SLOT_NUM[k]) : 0 };
     });
-    if (best._countered) {
-      best._counterNote = `Picked to counter the opponent's ${oppFormation}. Meta bias (3-backs) still applies, so this only deviates if the counter option is genuinely close in strength.`;
-    }
-    best.rows = FORMATION_ROWS[best.formation];
+    return { lineup, totalRec: lineup.reduce((s, l) => s + l.effectiveR5, 0), formation: formationKey };
+  }
+
+  // Pure strength pick across every formation. No meta bias or counter nudge: on a real squad
+  // the top formations land within ~1% of each other, so a guessed +3-4% bonus silently
+  // decided the formation. `alternatives` lists the shapes within 1% — a genuine coin flip.
+  function bestFormation(players) {
+    players.forEach(ensureR5);
+    const all = Object.keys(FORMATIONS).map(key => pickBestXI(players, key)).sort((a, b) => b.totalRec - a.totalRec);
+    const best = all[0];
+    best.alternatives = all.slice(1).filter(r => r.totalRec >= best.totalRec * 0.99).map(r => r.formation);
     return best;
   }
 
-  // A specific, sensible bench shape rather than "next 7 best regardless of role":
-  // one GK, one defender, one midfielder, one winger, one striker — using the same
-  // bucketFor/sideFor classification as the rest of the script. The DEF pick also leans
-  // toward Marking/Tackling when the opponent's attack is strong, same logic as the XI.
-  function pickBench(remainingPlayers, opponentData) {
+  // Lines and sides a favourite-position string covers ("D/DM L" -> D+DM, L).
+  function fpLinesSides(fp) {
+    const lines = new Set(), sides = new Set();
+    String(fp || '').toUpperCase().split(',').forEach(seg => {
+      const [l, s] = seg.trim().split(/\s+/);
+      (l || '').split('/').filter(Boolean).forEach(x => lines.add(x));
+      (s || 'C').split('').forEach(x => sides.add(x));
+    });
+    return { lines, sides };
+  }
+
+  // TM's five bench slots in its own order (the page lists sub5 first): FWD, WING, MID, DEF,
+  // GK. Each takes the best natural player for the role, rated in the slots he'd cover.
+  const BENCH_ROLES = [
+    { key: 'sub5', role: 'FWD', slots: ['fc'], fits: f => f.lines.has('F') },
+    { key: 'sub4', role: 'WING', slots: ['ml', 'mr', 'oml', 'omr'], fits: f => (f.lines.has('M') || f.lines.has('OM')) && (f.sides.has('L') || f.sides.has('R')) },
+    { key: 'sub3', role: 'MID', slots: ['dmc', 'mc', 'omc'], fits: f => (f.lines.has('DM') || f.lines.has('M') || f.lines.has('OM')) && f.sides.has('C') },
+    { key: 'sub2', role: 'DEF', slots: ['dcl', 'dl', 'dr'], fits: f => f.lines.has('D') },
+    { key: 'sub1', role: 'GK', slots: ['gk'], fits: f => f.lines.has('GK') },
+  ];
+  function pickBench(remainingPlayers) {
     const used = new Set();
-    const attackThreat = opponentAttackThreat(opponentData);
-    const take = (predicate, matchupAware) => {
-      const candidates = remainingPlayers.filter(p => !used.has(p.id) && predicate(p));
-      candidates.sort((a, b) => {
-        let sa = a._r5 || 0, sb = b._r5 || 0;
-        if (matchupAware && attackThreat != null) {
-          sa += (((Number(a.skills?.mar) || 0) + (Number(a.skills?.tac) || 0)) / 2) * (attackThreat / 100) * 0.5;
-          sb += (((Number(b.skills?.mar) || 0) + (Number(b.skills?.tac) || 0)) / 2) * (attackThreat / 100) * 0.5;
-        }
-        return sb - sa;
-      });
-      if (candidates[0]) { used.add(candidates[0].id); return candidates[0]; }
-      return null;
-    };
-    const gk = take(p => bucketFor(p.fp) === 'GK');
-    const wing = take(p => sideFor(p.fp) !== 'C' && bucketFor(p.fp) !== 'GK' && bucketFor(p.fp) !== 'F');
-    const def = take(p => (bucketFor(p.fp) === 'D' || bucketFor(p.fp) === 'DM'), true);
-    const mid = take(p => (bucketFor(p.fp) === 'M' || bucketFor(p.fp) === 'OM') && sideFor(p.fp) === 'C');
-    const fc = take(p => bucketFor(p.fp) === 'F');
-    const named = [
-      { role: 'FC', player: fc }, { role: 'WING', player: wing }, { role: 'MID', player: mid },
-      { role: 'DEF', player: def }, { role: 'GK', player: gk },
-    ];
-    const extras = remainingPlayers.filter(p => !used.has(p.id)).sort((a, b) => b._r5 - a._r5).slice(0, 2);
+    const named = BENCH_ROLES.map(r => {
+      const rate = p => Math.max(...r.slots.map(k => slotRating(p, k)));
+      const free = remainingPlayers.filter(p => !used.has(p.id));
+      const natural = free.filter(p => r.fits(fpLinesSides(p.fp)));
+      // No natural option left: take the best rated cover rather than leave the slot empty.
+      const pool = natural.length ? natural : free.filter(p => isFinite(rate(p)));
+      const player = pool.sort((a, b) => rate(b) - rate(a))[0] || null;
+      if (player) used.add(player.id);
+      return { key: r.key, role: r.role, player, rating: player ? rate(player) : 0 };
+    });
+    const extras = remainingPlayers.filter(p => !used.has(p.id)).sort((a, b) => (b._r5 || 0) - (a._r5 || 0)).slice(0, 2);
     return { named, extras };
   }
 
-  // Set-piece taker scoring — same skill combinations the R5 formula itself uses for the
-  // free-kick/corner/penalty bonus terms (Section 2B), so the "best taker" ranking is
-  // consistent with what actually earns bonus rating in-game, not a separate guess.
-  // Rebalanced from an earlier equal-weight version: giving "Set" the same weight as the
-  // specialised skill let one high-Set all-rounder sweep captain/FK/CK/PK together, which
-  // doesn't reflect real specialisation (a good penalty taker isn't automatically your best
-  // free-kick taker). Finishing/Longshots/Crossing now carry the majority weight for their
-  // respective role, with Set and Technique as secondary contributors.
+  // Taker ranking = the skill sums the R5 formula itself uses for its free-kick / corner /
+  // penalty bonus terms (Section 2B: set + lon | cro | fin + tec/2).
   function setPieceScore(p, type) {
-    const s = p.skills || {};
-    const set = Number(s.set) || 0, tec = Number(s.tec) || 0;
-    if (type === 'fk') return (Number(s.lon) || 0) * 1.2 + tec * 0.5 + set * 0.4;
-    if (type === 'ck') return (Number(s.cro) || 0) * 1.2 + tec * 0.4 + set * 0.4;
-    if (type === 'pk') return (Number(s.fin) || 0) * 1.4 + tec * 0.4 + set * 0.3;
-    return 0;
+    const s = p.skills || {}, n = k => Number(s[k]) || 0;
+    const main = type === 'fk' ? n('lon') : type === 'ck' ? n('cro') : n('fin');
+    return n('set') + main + n('tec') * 0.5;
   }
 
   function pickSquadRoles(startingPlayers) {
-    const rank = type => [...startingPlayers].sort((a, b) => setPieceScore(b, type) - setPieceScore(a, type))[0];
-    // TrophyManager doesn't expose a "leadership" skill via any scraped source we have —
-    // ASI (ability/experience index) is the best available proxy for on-pitch authority.
-    const captain = [...startingPlayers].sort((a, b) => (Number(b.asi) || 0) - (Number(a.asi) || 0))[0];
+    const outfield = startingPlayers.filter(p => bucketFor(p.fp) !== 'GK');
+    const rank = type => [...outfield].sort((a, b) => setPieceScore(b, type) - setPieceScore(a, type))[0] || null;
+    // Heuristic: TM documents no captain effect; routine (match experience) is our proxy.
+    const captain = [...startingPlayers].sort((a, b) => (Number(b.routine) || 0) - (Number(a.routine) || 0))[0] || null;
     return { captain, freeKick: rank('fk'), corner: rank('ck'), penalty: rank('pk') };
   }
 
@@ -2058,10 +2059,6 @@
     }
     let mentality = 4; // Normal
     let reasoning = [];
-    if (FORMATION_BIAS[myXI.formation]) {
-      reasoning.push('Formation weighted toward ' + myXI.formation + ': 3-back line-ups are currently over-performing versus what raw R5 math alone would predict - worth re-checking this bias periodically.');
-    }
-    if (myXI._countered) reasoning.push('Formation auto-counters the scanned opponent: ' + myXI._counterNote);
     if (oppAvg != null) {
       // R5 scales up with overall player level, so compare as a % difference rather than
       // an absolute point gap — a 5-point gap means very different things at R5 40 vs R5 140.
@@ -2105,26 +2102,24 @@
     const outfield = myXI.lineup.filter(l => l.player && bucketFor(l.player.fp) !== 'GK').map(l => l.player);
     const avgSkill = (key) => outfield.reduce((s, p) => s + (Number(p.skills[key]) || 0), 0) / (outfield.length || 1);
     const cro = avgSkill('cro'), pas = avgSkill('pas'), tec = avgSkill('tec'), lon = avgSkill('lon'), pac = avgSkill('pac');
-    let style = 1; // Balanced
-    const scores = {
-      2: pac + lon * 0.5,               // Direct — pace & long shots/passes forward fast
-      3: cro,                           // Wings — crossing ability
-      4: pas + tec,                     // Shortpassing — passing & technique
-      5: lon,                           // Long balls
-      6: tec + pas * 0.5,               // Through balls — technique/vision
-    };
-    let bestStyle = 1, bestScore = -1;
-    Object.entries(scores).forEach(([k, v]) => { if (v > bestScore) { bestScore = v; bestStyle = Number(k); } });
-    style = bestStyle;
-    reasoning.push('Attacking style "' + ATT_STYLE[style] + '" chosen from squad\'s strongest attribute profile (Cro ' + cro.toFixed(1) + ', Pas ' + pas.toFixed(1) + ', Tec ' + tec.toFixed(1) + ', Lon ' + lon.toFixed(1) + ', Pac ' + pac.toFixed(1) + ').');
+    // Heuristic (TM publishes no style formula). Each style is scored on the weighted MEAN of
+    // the skills it leans on. The old raw sums made two-skill styles beat one-skill styles by
+    // construction, so Shortpassing (pas + tec) won for every squad. No clear leader → Balanced.
+    const STYLE_SKILLS = { 2: { pac: 1, lon: 0.5 }, 3: { cro: 1, pac: 0.5 }, 4: { pas: 1, tec: 1 }, 5: { lon: 1, pas: 0.5 }, 6: { tec: 1, pas: 0.5 } };
+    const styleFit = w => Object.entries(w).reduce((t, [k, x]) => t + avgSkill(k) * x, 0) / Object.values(w).reduce((a, b) => a + b, 0);
+    const styleRank = Object.entries(STYLE_SKILLS).map(([k, w]) => [Number(k), styleFit(w)]).sort((a, b) => b[1] - a[1]);
+    const style = styleRank[0][1] - styleRank[1][1] >= 0.5 ? styleRank[0][0] : 1;
+    reasoning.push('Attacking style "' + ATT_STYLE[style] + '" (own heuristic) — ' + (style === 1
+      ? 'no style clearly fits the XI better than another (top two within 0.5 skill points), so Balanced.'
+      : 'clearest fit for the XI\'s skills') + ' (Cro ' + cro.toFixed(1) + ', Pas ' + pas.toFixed(1) + ', Tec ' + tec.toFixed(1) + ', Lon ' + lon.toFixed(1) + ', Pac ' + pac.toFixed(1) + ').');
 
     // Focus side: which flank to attack down. This is NOT just "which of our sides is
     // stronger" — attacking down our left means attacking INTO their right-back/right-DM
     // area, so what matters is our side strength minus THEIR defensive strength on the
     // side we'd be attacking into. A strong side of ours facing an even stronger opposing
     // flank is not automatically the right side to focus.
-    const leftPlayers = myXI.lineup.filter(l => l.player && l.slot.split('-')[1] === 'L');
-    const rightPlayers = myXI.lineup.filter(l => l.player && l.slot.split('-')[1] === 'R');
+    const leftPlayers = myXI.lineup.filter(l => l.player && l.side === 'L');
+    const rightPlayers = myXI.lineup.filter(l => l.player && l.side === 'R');
     const leftAvg = leftPlayers.length ? leftPlayers.reduce((s, l) => s + l.effectiveR5, 0) / leftPlayers.length : null;
     const rightAvg = rightPlayers.length ? rightPlayers.reduce((s, l) => s + l.effectiveR5, 0) / rightPlayers.length : null;
 
@@ -2141,8 +2136,11 @@
     if (leftAvg == null && rightAvg == null) {
       reasoning.push('Focus side: Balanced — no clear left/right players identified in the starting XI.');
     } else {
-      const netLeft = (leftAvg ?? 0) - (oppRightDef ?? leftAvg ?? 0);   // our left attack vs their right defence
-      const netRight = (rightAvg ?? 0) - (oppLeftDef ?? rightAvg ?? 0); // our right attack vs their left defence
+      // Without both opposing flanks known, compare our own flanks. (The old fallback subtracted
+      // each side's own average from itself, so with no opponent data focus was always Balanced.)
+      const oppKnown = oppLeftDef != null && oppRightDef != null;
+      const netLeft = (leftAvg ?? 0) - (oppKnown ? oppRightDef : 0);   // our left attack vs their right defence
+      const netRight = (rightAvg ?? 0) - (oppKnown ? oppLeftDef : 0);  // our right attack vs their left defence
       const gap = netLeft - netRight;
       if (Math.abs(gap) > 8) focus = gap > 0 ? 2 : 4; else focus = 1;
       const oppNote = (oppLeftDef != null && oppRightDef != null)
@@ -2166,6 +2164,51 @@
       oppAvg
     );
     return { mentality, style, focus, reasoning, counter: fcDiff.counter, difficulty: fcDiff.difficulty };
+  }
+
+  // Conditional orders in TM's own codes (CLAUDE.md "Tactics page"): one event + one score
+  // state + one order each, max 5. A sub comes on in a FREE slot of his own line, so he plays
+  // his natural position and the shape changes on purpose (extra striker / back five).
+  const CO_EVENT = { MINUTE: 1, RED_CARD: 4 };
+  const CO_SCORE = { WINNING: 1, LOSING: 3, ANY: 4 };
+  const CO_ORDER = { SUB: 1, MENTALITY: 2 };
+  function buildCondOrders(best, bench, ment) {
+    const used = new Set(best.lineup.map(l => l.slot));
+    const freeSlot = prefs => prefs.find(k => !used.has(k)) || null;
+    const weakest = buckets => best.lineup.filter(l => l.player && buckets.includes(l.bucket)).sort((a, b) => a.effectiveR5 - b.effectiveR5)[0] || null;
+    const benchOf = role => (bench.named.find(b => b.role === role && b.player) || {}).player || null;
+    const m = v => Math.max(1, Math.min(7, v));
+    const mentality = (min, condId, condPar, to) => ({ eventId: CO_EVENT.MINUTE, eventPar: min, condId, condPar, orderId: CO_ORDER.MENTALITY, par1: to });
+    const sub = (min, condId, condPar, inP, off, slot) => (inP && off && slot)
+      ? { eventId: CO_EVENT.MINUTE, eventPar: min, condId, condPar, orderId: CO_ORDER.SUB, par1: off.player.id, par2: inP.id, par3: slot, inName: inP.name, outName: off.player.name }
+      : null;
+    return [
+      mentality(70, CO_SCORE.LOSING, -1, m(ment + 2)),
+      sub(75, CO_SCORE.LOSING, -2, benchOf('FWD'), weakest(['M', 'DM']), freeSlot(['fc', 'fcl', 'fcr'])) || mentality(75, CO_SCORE.LOSING, -2, m(ment + 3)),
+      mentality(75, CO_SCORE.WINNING, 1, m(ment - 1)),
+      sub(70, CO_SCORE.WINNING, 2, benchOf('DEF'), weakest(['OM', 'F']), freeSlot(['dc', 'dcl', 'dcr'])) || mentality(70, CO_SCORE.WINNING, 2, m(ment - 2)),
+      { eventId: CO_EVENT.RED_CARD, eventPar: 0, condId: CO_SCORE.ANY, condPar: 0, orderId: CO_ORDER.MENTALITY, par1: m(ment - 2) },
+    ];
+  }
+  function describeCondOrder(o) {
+    return {
+      event: o.eventId === CO_EVENT.RED_CARD ? 'Red card (any player)' : `Minute ${o.eventPar}'`,
+      score: o.condId === CO_SCORE.ANY ? 'Any score' : (o.condId === CO_SCORE.WINNING ? 'Winning by ' : 'Losing by ') + Math.abs(o.condPar),
+      order: o.orderId === CO_ORDER.SUB ? `${o.inName} ON for ${o.outName}, at ${o.par3.toUpperCase()}` : 'Mentality → ' + MENTALITY[o.par1],
+    };
+  }
+
+  // The whole match plan — what the Tactics view shows AND what Apply posts to /tactics/ —
+  // built in one place, so roles and orders can never be picked for a different XI.
+  function buildMatchPlan(squad, opponent, scouting, expected) {
+    const players = squad.filter(p => (!p.ban || p.ban === '0') && !p.inj);
+    const best = bestFormation(players);
+    const settings = recommendTacticSettings(best, opponent, scouting, expected);
+    const starters = best.lineup.filter(l => l.player).map(l => l.player);
+    const ids = new Set(starters.map(p => p.id));
+    const bench = pickBench(players.filter(p => !ids.has(p.id)));
+    const roles = pickSquadRoles(starters);
+    return { players, best, settings, bench, roles, condOrders: buildCondOrders(best, bench, settings.mentality) };
   }
 
   // Tiny inline sparkline for a player's training-intensity trend (last 6 months),
@@ -2510,11 +2553,11 @@
     if (!playersSlice || !playersSlice.data || !playersSlice.data.length) return null;
     const players = playersSlice.data.map(p => ({ ...p }));
     players.forEach(ensureR5);
-    const best = bestFormation(players, null);
+    const best = bestFormation(players);
     const map = {};
     best.lineup.forEach(l => {
       if (!l.player) return;
-      const b = l.slot.split('-')[0];
+      const b = l.bucket;
       if (map[b] == null || l.effectiveR5 < map[b]) map[b] = l.effectiveR5;
     });
     return map;
@@ -2529,11 +2572,11 @@
     if (!playersSlice || !playersSlice.data || !playersSlice.data.length) return null;
     const players = playersSlice.data.map(p => ({ ...p }));
     players.forEach(ensureR5);
-    const best = bestFormation(players, null);
+    const best = bestFormation(players);
     const map = {};
     best.lineup.forEach(l => {
       if (!l.player || l.player.asi == null) return;
-      const b = l.slot.split('-')[0];
+      const b = l.bucket;
       const si = Number(l.player.asi);
       if (map[b] == null || si < map[b]) map[b] = si;
     });
@@ -3166,49 +3209,23 @@
       body.innerHTML = `<div class="tma-card"><h4>No squad data yet</h4></div>`;
       return;
     }
-    const players = playersSlice.data.filter(p => !p.ban || p.ban === '0').filter(p => !p.inj);
-    // Opponent formation for the auto-counter pick: this fixture's expected line-up first,
-    // their most-recent actual formation second (both confirmed sources, Section 3).
-    const oppFormation = (expectedSlice && expectedSlice.data && expectedSlice.data.formation)
-      || (scoutSlice && scoutSlice.data && scoutSlice.data.recentFormation) || null;
-    const best = bestFormation(players, oppSlice && oppSlice.data, oppFormation);
-    const settings = recommendTacticSettings(best, oppSlice && oppSlice.data, scoutSlice && scoutSlice.data, expectedSlice && expectedSlice.data);
+    const plan = buildMatchPlan(playersSlice.data, oppSlice && oppSlice.data, scoutSlice && scoutSlice.data, expectedSlice && expectedSlice.data);
+    const { players, best, settings, bench, roles } = plan;
     const startingPlayers = best.lineup.filter(l => l.player).map(l => l.player);
-    const usedIds = new Set(startingPlayers.map(p => p.id));
-    const remaining = players.filter(p => !usedIds.has(p.id));
-    const bench = pickBench(remaining, oppSlice && oppSlice.data);
-    const roles = pickSquadRoles(startingPlayers);
 
-    // Render the pitch using six fixed canonical rows — GK, Defence, DM, Midfield, OM,
-    // Forward — rather than the formation's own row grouping. This way the layout always
-    // reads as a real pitch shape and rows a formation doesn't use (e.g. no DM in 4-4-2)
-    // just don't appear, instead of being squashed into a neighbouring row.
-    const ROW_ORDER = ['F', 'OM', 'M', 'DM', 'D', 'GK'];
-    const SIDE_ORDER = { L: 0, C: 1, R: 2 };
-    const rowGroups = { GK: [], D: [], DM: [], M: [], OM: [], F: [] };
-    best.lineup.forEach(l => {
-      const slotPos = l.slot.split('-')[0];
-      const bucket = ROW_ORDER.includes(slotPos) ? slotPos : (l.player ? bucketFor(l.player.fp) : 'M');
-      (rowGroups[bucket] || rowGroups.M).push(l);
-    });
-    Object.values(rowGroups).forEach(row => row.sort((a, b) => {
-      const sa = SIDE_ORDER[a.slot.split('-')[1]] ?? 1, sb = SIDE_ORDER[b.slot.split('-')[1]] ?? 1;
-      return sa - sb;
-    }));
-    const pitchRowsHtml = ROW_ORDER.filter(k => rowGroups[k].length).map(k => {
-      const cells = rowGroups[k].map(l => {
-        if (!l.player) return `<div class="tma-slot"><div class="tma-pos">${l.slot}</div><b class="tma-empty">— empty —</b></div>`;
-        // Position-penalty is still factored into effectiveR5 and drives who gets picked —
-        // it's just not surfaced as a separate number here, per request.
-        return `<div class="tma-slot"><div class="tma-pos">${l.slot}</div><b>${esc(l.player.name)}</b><span class="tma-mini">R5 ${l.effectiveR5.toFixed(1)}${trainingSparkline(l.player.plot)}</span></div>`;
-      }).join('');
-      return `<div class="tma-pitch-row">${cells}</div>`;
-    }).join('');
+    // Pitch rows top to bottom; within a row TM's slot numbers already run left to right.
+    // A red "−N%" marks a slot where TM's own out-of-position penalty applies.
+    const pitchRowsHtml = ['F', 'OM', 'M', 'DM', 'D', 'GK']
+      .map(row => best.lineup.filter(l => l.bucket === row).sort((a, b) => SLOT_NUM[a.slot] - SLOT_NUM[b.slot]))
+      .filter(cells => cells.length)
+      .map(cells => `<div class="tma-pitch-row">${cells.map(l => l.player
+        ? `<div class="tma-slot"><div class="tma-pos">${l.slot.toUpperCase()}${l.penalty ? ` <span style="color:#d97a70;">−${l.penalty * 10}%</span>` : ''}</div><b>${esc(l.player.name)}</b><span class="tma-mini">R5 ${l.effectiveR5.toFixed(1)}${trainingSparkline(l.player.plot)}</span></div>`
+        : `<div class="tma-slot"><div class="tma-pos">${l.slot.toUpperCase()}</div><b class="tma-empty">— empty —</b></div>`).join('')}</div>`)
+      .join('');
 
-    const benchHtml = bench.named.map(b => {
-      if (!b.player) return `<div class="tma-bench-card"><span class="tma-role-tag">${b.role}</span><span class="tma-mini">no eligible player left</span></div>`;
-      return `<div class="tma-bench-card"><span class="tma-role-tag">${b.role}</span><span>${esc(b.player.name)} <span class="tma-badge">${esc(b.player.fp)}</span></span><span class="tma-mini">R5 ${(b.player._r5||b.player.rec).toFixed(1)}</span></div>`;
-    }).join('');
+    const benchHtml = bench.named.map(b => b.player
+      ? `<div class="tma-bench-card"><span class="tma-role-tag">${b.role}</span><span>${esc(b.player.name)} <span class="tma-badge">${esc(b.player.fp)}</span></span><span class="tma-mini">R5 ${b.rating.toFixed(1)}</span></div>`
+      : `<div class="tma-bench-card"><span class="tma-role-tag">${b.role}</span><span class="tma-mini">no eligible player left</span></div>`).join('');
     const benchExtrasHtml = bench.extras.length ? `<div class="tma-mini" style="margin-top:6px;">Also available: ${bench.extras.map(p => esc(p.name) + ' (' + esc(p.fp) + ')').join(', ')}</div>` : '';
 
     const rolesHtml = `
@@ -3218,76 +3235,16 @@
       <div class="tma-row"><span>Free-kick taker</span><span class="tma-goodval">${roles.freeKick ? esc(roles.freeKick.name) : '—'}</span></div>
     `;
 
-    // Conditional orders in TM are exactly: one Event + one Score state + one Order,
-    // configured before kickoff, max 5 total. Event types: specific time, player injured,
-    // player booked, player sent off, a goal is scored. Score types: winning by 1-4,
-    // losing by 1-4, drawn, doesn't matter. Order types: substitution, mentality change,
-    // attacking style change, reposition a player — only ONE of these per row, not several
-    // combined (the earlier version wrongly bundled a mentality change AND a substitution
-    // into a single order).
-    const defBenchName = bench.named.find(b => b.role === 'DEF' && b.player);
-    const fcBenchName = bench.named.find(b => b.role === 'FC' && b.player);
-    const weakestIn = (buckets) => {
-      const pool = buckets.flatMap(b => rowGroups[b] || []).filter(l => l.player);
-      if (!pool.length) return null;
-      return pool.reduce((min, l) => l.effectiveR5 < min.effectiveR5 ? l : min, pool[0]);
-    };
-    const weakestAttacker = weakestIn(['OM', 'F']);
-    const weakestMid = weakestIn(['M', 'DM']);
-
-    // Human-readable position label from a bucket + optional side (e.g. "D","L" -> "Left
-    // Defender"; "F" -> "Forward"). Used to spell out repositioning in substitution orders.
-    const POS_BUCKET_LABEL = { GK: 'Goalkeeper', D: 'Defender', DM: 'Defensive Mid', M: 'Midfielder', OM: 'Attacking Mid', F: 'Forward' };
-    const SIDE_LABEL = { L: 'Left', C: 'Central', R: 'Right' };
-    const posLabel = (bucket, side) => {
-      const b = POS_BUCKET_LABEL[bucket] || bucket;
-      if (!side || side === 'C') return b;            // central/no-side reads cleaner without "Central"
-      return (SIDE_LABEL[side] || '') + ' ' + b;
-    };
-
-    // Substitution order text that ALSO states which pitch position to give the incoming
-    // player on TM's sub screen. Leaving him on the vacated slot's position by default
-    // (e.g. subbing on a natural FC for a MR and just leaving him at MR) eats the off-position
-    // penalty that pickBestXI/positionPenaltyMultiplier already accounts for when picking the
-    // starting XI — so a substitute should get the SAME treatment: play him in his own
-    // natural position whenever it differs from the slot he's replacing, not the vacated one.
-    //   • same bucket + same side  -> already the vacated slot, nothing to change
-    //   • same bucket, other flank -> same role, just a flank switch
-    //   • different bucket         -> explicitly place him in his OWN position, not the vacated one
-    const subOrder = (benchPick, offPlayer) => {
-      if (!benchPick || !offPlayer || !benchPick.player || !offPlayer.player) return null;
-      const inP = benchPick.player, out = offPlayer.player;
-      const [slotBucket, slotSideRaw] = offPlayer.slot.split('-');
-      const slotSide = slotSideRaw || 'C';
-      const inBucket = bucketFor(inP.fp), inSide = sideFor(inP.fp);
-      const vacated = posLabel(slotBucket, slotSide);
-      const natural = posLabel(inBucket, inSide);
-      let posNote;
-      if (inBucket === slotBucket && inSide === slotSide) {
-        posNote = ' — plays ' + vacated;
-      } else if (inBucket === slotBucket) {
-        posNote = ' — plays ' + (SIDE_LABEL[slotSide] || 'Central') + ' ' + (POS_BUCKET_LABEL[slotBucket] || slotBucket);
-      } else {
-        posNote = ' — set his position to ' + natural;
-      }
-      return 'Substitution: ' + inP.name + ' ON for ' + out.name + ' OFF' + posNote;
-    };
-
-    // Exactly 5 slots, each a single {event, score, order} triple:
-    const condOrders = [
-      { event: 'Time reaches 70\'', score: 'Losing by 1+', order: 'Change mentality to ' + MENTALITY[Math.min(7, settings.mentality + 2)] },
-      { event: 'Time reaches 75\'', score: 'Losing by 2+', order: subOrder(fcBenchName, weakestMid) || ('Change mentality to ' + MENTALITY[Math.min(7, settings.mentality + 3)]) },
-      { event: 'Time reaches 75\'', score: 'Winning by 1', order: 'Change mentality to ' + MENTALITY[Math.max(1, settings.mentality - 1)] },
-      { event: 'Time reaches 70\'', score: 'Winning by 2+', order: subOrder(defBenchName, weakestAttacker) || ('Change mentality to ' + MENTALITY[Math.max(1, settings.mentality - 2)]) },
-      { event: 'Player sent off (yours)', score: 'Doesn\'t matter', order: 'Change mentality to ' + MENTALITY[Math.max(1, settings.mentality - 2)] },
-    ];
-    const condOrdersHtml = condOrders.map((c, i) => `
+    const condOrdersHtml = plan.condOrders.map((o, i) => {
+      const c = describeCondOrder(o);
+      return `
       <div class="tma-card" style="margin-bottom:8px;">
         <div class="tma-mini" style="text-transform:uppercase;letter-spacing:.04em;color:#8a939c;">Order ${i + 1}</div>
         <div class="tma-row"><span>Event</span><span>${esc(c.event)}</span></div>
         <div class="tma-row"><span>Score</span><span>${esc(c.score)}</span></div>
         <div class="tma-row"><span>Order</span><span class="tma-goodval">${esc(c.order)}</span></div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
 
     // Expected (this fixture) tactics — the primary, proof-backed read from the match page,
     // with the substitute-inclusion bug fixed (see fetchNextMatchExpected, Section 3) so the
@@ -3322,6 +3279,7 @@
     body.innerHTML = `
       <div class="tma-card">
         <h4>Recommended Formation: ${best.formation} <span class="tma-badge">Avg R5 ${(best.totalRec / startingPlayers.length).toFixed(1)}</span></h4>
+        ${best.alternatives.length ? `<div class="tma-mini" style="margin-bottom:6px;">${best.alternatives.join(', ')} ${best.alternatives.length > 1 ? 'are' : 'is'} within 1% — for this squad the shape barely matters; who plays where does.</div>` : ''}
         <div class="tma-pitch">${pitchRowsHtml}</div>
       </div>
       <div class="tma-card">
@@ -3343,7 +3301,7 @@
       </div>
       <div class="tma-card">
         <h4>Conditional Orders (set before kickoff) <span class="tma-badge">5 / 5 used</span></h4>
-        <div class="tma-mini" style="margin-bottom:8px;">Enter these in TM's Conditional Order screen exactly as shown — each is one Event, one Score state, and one single Order. For substitutions, the note after the players tells you which position to select on the sub screen — his own natural role, not just the slot he's replacing, so he isn't played out of position.</div>
+        <div class="tma-mini" style="margin-bottom:8px;">Enter these in TM's Conditional Order screen exactly as shown — each is one Event, one Score state, and one single Order. Substitutes come on in a free slot of their own line, so they play their natural position.</div>
         ${condOrdersHtml}
       </div>
       ${expectedTacticsHtml}
