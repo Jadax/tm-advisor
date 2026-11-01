@@ -28,7 +28,7 @@ TM Advisor answers all of these — automatically, on every page — using only 
 
 ### ⚡ Match Copilot
 
-One **Prepare match** button on the Dashboard does everything the next match needs — each step behind its own switch, every save read back from the game:
+One **⚡ Prepare match** button — at the top of the panel on every page, the only action you need — does everything both teams need for their next matches — each step behind its own switch, every save read back from the game:
 
 | Step | What it does |
 |---|---|

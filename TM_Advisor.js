@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.16.1
+// @version      3.17.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -2166,7 +2166,7 @@
       else if (diffPct < -4) { mentality = 3; reasoning.push('Slight quality deficit (' + diffPct.toFixed(1) + '%) ' + srcNote + ' → Slightly Defensive.'); }
       else { reasoning.push('Evenly matched squads ' + srcNote + ' → Normal mentality, adjust live on the scoreline.'); }
     } else {
-      reasoning.push('No opponent squad data cached yet — defaulting to Normal. Visit the opponent squad page or hit "Update All" once your next match is known.');
+      reasoning.push('No opponent squad data cached yet — defaulting to Normal. Press ⚡ Prepare match once your next match is known.');
     }
 
     // Counter-nudge based on the opponent's mentality. PRIMARY source is the EXPECTED
@@ -3219,6 +3219,7 @@
   async function runCopilot(force, onProgress) {
     const prefs = autopilotPrefs(), steps = copilotSteps(), dry = !!prefs.dryRun;
     if (!prefs.enabled && !force) return null;
+    if (!window.SESSION || !SESSION.id) return force ? { ok: false, msg: 'Sign in to TrophyManager first' } : null;
     const state = (getSlice('autopilot') || { data: {} }).data || {};
     if (!force && state.lastTry && now() - state.lastTry < AUTOPILOT_GAP_MS) return null;
     setSlice('autopilot', { ...state, lastTry: now() }); // claimed first, so a second open tab backs off
@@ -4138,7 +4139,9 @@
      "TM Advisor ›" (~90px wide), so the minimized state takes almost no pitch. ---- */
   #tma-panel.tma-collapsed { max-height:44px; width:auto; opacity:.92; }
   #tma-panel.tma-collapsed .tma-head-row { width:max-content; }
-  #tma-panel.tma-collapsed .tma-tabs, #tma-panel.tma-collapsed .tma-body, #tma-panel.tma-collapsed .tma-sub { display:none; }
+  #tma-panel.tma-collapsed .tma-tabs, #tma-panel.tma-collapsed .tma-body, #tma-panel.tma-collapsed .tma-sub, #tma-panel.tma-collapsed .tma-prep { display:none; }
+  .tma-prep { padding:0 0 10px; cursor:default; }
+  .tma-prep .tma-btn { margin-top:0; }
   #tma-panel.tma-collapsed .tma-head { padding:10px 14px; border-bottom:none; }
   #tma-panel.tma-collapsed .tma-head:hover { background:#242428; opacity:1; }
   /* ---- Header (sticky, draggable, doubles as the expand/collapse target) ---- */
@@ -4326,6 +4329,7 @@
           </div>
         </div>
         <div class="tma-sub">Cached club intelligence · club ${clubId}</div>
+        <div class="tma-prep"><button class="tma-btn" id="tma-prep-btn">⚡ Prepare match</button><div class="tma-progress" id="tma-prep-status"></div></div>
         <div class="tma-tabs" id="tma-tabs"></div>
       </div>
       <div class="tma-body" id="tma-body"></div>
@@ -4342,6 +4346,18 @@
       panel.classList.toggle('tma-collapsed', collapsed);
       if (!collapsed) openTab(document.querySelector('.tma-tab.active')?.dataset.tab || contextTabForPath());
     };
+    // The single action: everything both teams need for their next matches (runCopilot, 5H).
+    panel.querySelector('#tma-prep-btn').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const btn = e.currentTarget, st = document.getElementById('tma-prep-status');
+      btn.disabled = true;
+      const entry = await runCopilot(true, t => { st.textContent = t; }).catch(err => ({ ok: false, msg: err.message }));
+      st.textContent = !entry ? '' : entry.msg && !entry.lines ? '⚠ ' + entry.msg : `${entry.ok ? '✔ Done' : '⚠ Done with warnings'} — details on the Dashboard`;
+      btn.disabled = false;
+      refreshMatchStatus();
+      const active = document.querySelector('.tma-tab.active');
+      renderTab(active ? active.dataset.tab : contextTabForPath());
+    });
     panel.querySelector('#tma-collapse-toggle').addEventListener('click', (e) => {
       e.stopPropagation();
       setCollapsed(!panel.classList.contains('tma-collapsed'));
@@ -4479,7 +4495,7 @@
       <div class="tma-row"><span class="tma-mini">${esc(nm.when || '')}</span><span class="tma-mini">${nmi ? esc(kickoffText(nmi)) : ''}</span></div>
       ${nmi && nmi.prediction ? `<div class="tma-row"><span>Expected (model)</span><span class="tma-goodval">${nmi.prediction.gd >= 0 ? '+' : ''}${nmi.prediction.gd.toFixed(1)} goals</span></div>` : ''}
       <div class="tma-row"><span>Tactic</span><span style="color:${nmi && nmi.applied ? 'var(--tma-lime)' : 'var(--tma-amber)'};font-weight:700;">${nmi && nmi.applied ? '✔ applied for this match' : '⚠ not applied yet'}</span></div>
-      <a class="tma-btn" href="/tactics/" style="display:block;text-align:center;text-decoration:none;">Review &amp; apply on Tactics →</a>` : `<div class="tma-mini">No data yet.</div>`;
+      ` : `<div class="tma-mini">No data yet.</div>`;
 
     const lastResult = c.lastMatchResult;
     const lastResultHtml = lastResult ? (() => {
@@ -4508,7 +4524,6 @@
       <div class="tma-card">
         <h4>Data Freshness</h4>
         ${rows}
-        <button class="tma-btn" id="tma-refresh">🔄 Update All Now</button>
         <div class="tma-progress" id="tma-progress"></div>
       </div>
       ${lastResultHtml}
@@ -4519,14 +4534,6 @@
       ${autopilotCardHtml()}
     `;
     bindAutopilotCard();
-    document.getElementById('tma-refresh').addEventListener('click', async () => {
-      const prog = document.getElementById('tma-progress');
-      await refreshAll((key, status) => {
-        prog.textContent = 'Refreshing ' + key + '… ' + status;
-      });
-      prog.textContent = 'Done ✔';
-      renderDashboard();
-    });
   }
 
   function autopilotCardHtml() {
@@ -4536,9 +4543,8 @@
     const entryHtml = e => `<div style="margin-top:8px;"><div class="tma-row"><span style="color:${e.ok ? 'var(--tma-lime)' : 'var(--tma-amber)'};font-weight:600;">${e.ok ? '✔' : '⚠'} ${esc(e.msg)}</span><span class="tma-mini">${ago(e.t)}</span></div>${(e.lines || []).map(l => `<div class="tma-mini" style="padding:1px 0 1px 8px;">${esc(l)}</div>`).join('')}</div>`;
     return `
       <div class="tma-card">
-        <h4>Match copilot <span class="tma-badge">${ap.enabled ? (ap.dryRun ? 'autopilot · dry run' : 'autopilot on') : 'manual'}</span></h4>
-        <button class="tma-btn" id="tma-ap-run">⚡ Prepare match</button>
-        <div class="tma-progress" id="tma-ap-status"></div>
+        <h4>Copilot <span class="tma-badge">${ap.enabled ? (ap.dryRun ? 'autopilot · dry run' : 'autopilot on') : 'manual'}</span></h4>
+        <div class="tma-mini">What ⚡ Prepare match (top of this panel) and the autopilot do, and what they did last:</div>
         <div class="tma-mini" style="margin:10px 0 2px;text-transform:uppercase;letter-spacing:.04em;">Steps</div>
         ${toggle('tma-step-reserves', st.reserves, 'Reserves — youths (≤21) outside the first XI + bench go down for minutes, promoted when they\'d start; full tactic + conditional orders for the reserves\' own opponent, youths first')}
         ${toggle('tma-step-tactics', st.tactics, 'Opponent scan → XI, bench, captain &amp; set pieces, mentality/style/focus, conditional orders')}
@@ -4567,12 +4573,6 @@
     flip('tma-step-facilities', v => {
       if (v && !window.confirm('Facility upgrades spend club cash and take weeks to build. Let the copilot start one when the rules say it is needed?')) return false;
       setCopilotSteps({ ...copilotSteps(), facilities: v });
-    });
-    bindBtn('tma-ap-run', async () => {
-      const st = document.getElementById('tma-ap-status'), btn = document.getElementById('tma-ap-run');
-      btn.disabled = true;
-      await runCopilot(true, t => { st.textContent = t; });
-      renderDashboard();
     });
   }
 
@@ -4799,13 +4799,13 @@
       </label>` : '';
     return `
       <div class="tma-card" id="tma-apply-card">
-        <h4>Apply to this tactics page <span class="tma-badge" id="tma-apply-count">checking…</span></h4>
+        <h4>This match's plan <span class="tma-badge" id="tma-apply-count">checking…</span></h4>
+        <div class="tma-mini" style="margin-bottom:4px;">⚡ Prepare match saves it (with the reserves, training and youth pull).</div>
         ${result}
         ${lockedLine}
         ${oppLine}
         ${restToggle}
         <details id="tma-apply-preview"><summary class="tma-mini" style="cursor:pointer;">Preview changes</summary><div id="tma-apply-diff" class="tma-mini">Reading what's saved…</div></details>
-        <button class="tma-btn" id="tma-apply" disabled>Apply plan</button>
         ${getSlice('tacticsBackup') ? '<button class="tma-btn secondary" id="tma-undo">Undo last apply</button>' : ''}
         <div class="tma-progress" id="tma-apply-status"></div>
       </div>`;
@@ -4819,13 +4819,12 @@
     if (restBox) restBox.addEventListener('change', () => { try { localStorage.setItem(REST_BAN_RISK_KEY, restBox.checked ? '1' : '0'); } catch (e) {} renderTactics(); });
     readSavedTactic().then(saved => {
       const rows = tacticDiff(state, saved);
-      const count = document.getElementById('tma-apply-count'), diff = document.getElementById('tma-apply-diff'), btn = document.getElementById('tma-apply');
+      const count = document.getElementById('tma-apply-count'), diff = document.getElementById('tma-apply-diff');
       if (!count) return; // view was re-rendered meanwhile
       count.textContent = rows.length ? rows.length + ' change' + (rows.length > 1 ? 's' : '') : 'up to date';
       diff.innerHTML = rows.length
         ? rows.map(([what, from, to]) => `<div class="tma-row"><span>${esc(what)}</span><span>${esc(from)} → <b>${esc(to)}</b></span></div>`).join('')
         : 'The saved tactic already matches this plan.';
-      btn.disabled = !rows.length || !opponentReadiness().ready;
     }).catch(e => { status.textContent = 'Could not read the saved tactic: ' + e.message; });
     const run = (label, fn) => async () => {
       document.querySelectorAll('#tma-apply-card .tma-btn').forEach(b => { b.disabled = true; });
@@ -4836,7 +4835,6 @@
       await refreshAll((key, st) => { status.textContent = 'Scanning: ' + key + ' ' + st; });
       renderTactics();
     }));
-    bindBtn('tma-apply', run('Applying plan', () => { recordPrediction(plan); return saveTacticAndVerify(state, 'Plan applied', true); }));
     bindBtn('tma-undo', run('Undoing', () => {
       const b = getSlice('tacticsBackup').data;
       return saveTacticAndVerify({ ...b, orders: b.orders.map(o => Object.fromEntries(ORDER_FIELDS.map(f => [f, o[f]]))) }, 'Undo', false);
