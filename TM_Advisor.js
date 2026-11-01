@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.11.0
+// @version      3.11.1
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -2924,7 +2924,7 @@
     const current = await readSavedTactic();
     if (backup) setSlice('tacticsBackup', current);
     await writeTactic(state, current);
-    sessionStorage.setItem(PENDING_VERIFY_KEY, JSON.stringify({ state, label }));
+    sessionStorage.setItem(PENDING_VERIFY_KEY, JSON.stringify({ state, label, t: now() }));
     location.reload();
   }
 
@@ -2932,12 +2932,15 @@
     let pending = null;
     try { pending = JSON.parse(sessionStorage.getItem(PENDING_VERIFY_KEY)); } catch (e) {}
     if (!pending) return;
-    sessionStorage.removeItem(PENDING_VERIFY_KEY);
+    // A stale marker (page left mid-check, edits since) would compare against an old plan.
+    if (!pending.t || now() - pending.t > 10 * 60e3) { sessionStorage.removeItem(PENDING_VERIFY_KEY); return; }
     for (let i = 0; i < 20 && !window.jQuery; i++) await sleep(250);
     let mismatches;
     try { mismatches = onTacticsPage() ? tacticMismatches(pending.state, await readSavedTactic()) : ['tactics page did not load']; }
     catch (e) { mismatches = ['read-back failed: ' + e.message]; }
     setSlice('tacticsApplied', { label: pending.label, ok: !mismatches.length, mismatches });
+    // Cleared only once the result is stored: navigating away mid-check retries next load.
+    sessionStorage.removeItem(PENDING_VERIFY_KEY);
     if (document.getElementById('tma-body') && document.querySelector('.tma-tab.active')?.dataset.tab === 'tactics') renderTactics();
   }
 
