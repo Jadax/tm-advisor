@@ -26,12 +26,14 @@ Single-file Tampermonkey userscript (`TM_Advisor.js`) for trophymanager.com. One
 
 ## Tactics page (`/tactics/`, `js/tactics_v2.js` — read + written live 2026-11-01)
 
-- Globals: `players` (full squad: `skills[]` keyed `strength…set_pieces` / GK `handling…throwing`, star skills are `<img alt='20'>` strings, `skill_index` comma string, `routine`, `fp` "D/DM L" / "OM C, F", `injury`, `banned`, `status_no_check` holds the yellow-card ban-risk icon), `on_field_assoc` (key → player_id, "0" = empty), `cond_orders`, `reserves`, `national`, `miniGameId`.
+- `players` / `on_field_assoc` are filled ASYNCHRONOUSLY (`tactics_init` posts `/ajax/tactics_get.ajax.php` → `{players, formation_assoc, formation, formation_subs, positions}`); at document-end they are still `{}`. Never read them — fetch that endpoint yourself (`loadTacticsPage`). The mentality/attacking/focus `<select>`s are server-rendered and safe to read.
+- Squad fields (`players`: `skills[]` keyed `strength…set_pieces` / GK `handling…throwing`, star skills are `<img alt='20'>` strings, `skill_index` comma string, `routine`, `fp` "D/DM L" / "OM C, F", `injury`, `banned`, `status_no_check` holds the yellow-card ban-risk icon), `on_field_assoc` (key → player_id, "0" = empty), `cond_orders`, `reserves`, `national`, `miniGameId`.
 - Slot keys + TM's position numbers: `gk`0 · `dl dcl dc dcr dr` 1-5 · `dml dmcl dmc dmcr dmr` 6-10 · `ml mcl mc mcr mr` 11-15 · `oml omcl omc omcr omr` 16-20 · `fcl fc fcr` 21-23. Bench `sub1`=GK `sub2`=DEF `sub3`=MID `sub4`=WING `sub5`=FWD (UI lists sub5 first). Roles `captain corner penalty freekick`.
 - Out-of-position penalty is TM's own: `retPlayerMood(fp, posNumber)` → 0-4, each step = 10% (source comments: side C↔L/R 20%, L↔R 10%; one line 10%, D→F 40%; non-GK in goal 40%; capped 4).
 - Save XI + bench + roles in ONE post: `$.post('/ajax/tactics_post.ajax.php', {on_field: <full 33-key map>, players: {pid: slotKey | 'out'}, reserves, national, miniGameId})` — roles are taken from `on_field`. Reply is HTML, not JSON (request `'text'`). Settings: same URL, `{save: 'mentality'|'attacking'|'focus', value, club_id, reserves, national, miniGameId}` → `[true, clubId, "0"]`.
 - Conditional orders: `/ajax/tactics_co_post.ajax.php` with one `cond_orders[i]` record (keep its `ID`) + reserves/national/miniGameId → `{saved:true}`. EVENT 1=minute (PAR), 4=red card; COND 1=winning by PAR, 3=losing by PAR (negative), 4=any; ORDER 2=mentality (PAR1), 1=sub (PAR1 out, PAR2 in, PAR3 slot key). The page's own `co_save(0)` is a no-op (falsy guard) — post directly.
-- Always read back after a reload (`on_field_assoc`, the three selects, `cond_orders`); `node --check` can't see any of this.
+- Always read back after a reload (`tactics_get` `formation_assoc`, the three selects, `tactics_co_get`); `node --check` can't see any of this. Apply/Undo live in SECTION 5G and do exactly that (`saveTacticAndVerify` → reload → `verifyPendingApply`).
+- Test changes on the live page without installing: push the work tree to a throwaway branch (`git commit-tree` + `git push origin <sha>:refs/heads/wip-x`, HEAD untouched), then in the signed-in browser pane `(0, eval)(await fetch('https://raw.githubusercontent.com/Jadax/tm-advisor/<sha>/TM_Advisor.js').then(r => r.text()))`. Delete the branch after.
 
 ## Cache keys (`tmAdvisor_<clubId>` single JSON blob)
 

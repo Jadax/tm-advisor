@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.8.0
+// @version      3.9.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -50,6 +50,7 @@
  *   SECTION 5D SPENDING GUIDANCE     (cash/wage-aware transfer budget)
  *   SECTION 5E TRAINING RECOMMENDATIONS (weak-primary + plateau + bloom advice)
  *   SECTION 5F LEAGUE STRENGTH       (rank clubs by best-XI R5)
+ *   SECTION 5G APPLY TO TACTICS PAGE (Preview/Apply/Undo, read-back verified)
  *   SECTION 6  STADIUM ENGINE        (upgrade ROI ranking)
  *   SECTION 7  UI                    (styles, panel; ONE context-relevant
  *                                       tab per page)
@@ -2200,8 +2201,10 @@
 
   // The whole match plan — what the Tactics view shows AND what Apply posts to /tactics/ —
   // built in one place, so roles and orders can never be picked for a different XI.
-  function buildMatchPlan(squad, opponent, scouting, expected) {
-    const players = squad.filter(p => (!p.ban || p.ban === '0') && !p.inj);
+  // opts.restBanRisk leaves out players one yellow card from a ban (tactics-page squads only
+  // carry that flag) — a per-match call: today's points vs a ban for the next fixture.
+  function buildMatchPlan(squad, opponent, scouting, expected, opts) {
+    const players = squad.filter(p => (!p.ban || p.ban === '0') && !p.inj && !(opts && opts.restBanRisk && p.banRisk));
     const best = bestFormation(players);
     const settings = recommendTacticSettings(best, opponent, scouting, expected);
     const starters = best.lineup.filter(l => l.player).map(l => l.player);
@@ -2748,6 +2751,165 @@
   }
 
   /* ============================================================
+   *  SECTION 5G — APPLY TO TACTICS PAGE  (Preview / Apply / Undo)
+   *  ------------------------------------------------------------
+   *  Saves a match plan with the exact requests /tactics/ itself sends
+   *  (protocol: CLAUDE.md "Tactics page"), then reloads and reads every
+   *  value back. Nothing here runs without a click.
+   * ============================================================ */
+
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const POSITION_KEYS = Object.keys(SLOT_NUM).concat(['sub1', 'sub2', 'sub3', 'sub4', 'sub5']);
+  const TACTIC_KEYS = POSITION_KEYS.concat(['captain', 'corner', 'penalty', 'freekick']);
+  const ORDER_FIELDS = ['EVENT_ID', 'EVENT_PAR', 'COND_ID', 'COND_PAR', 'ORDER_ID', 'ORDER_PAR1', 'ORDER_PAR2', 'ORDER_PAR3'];
+  const REST_BAN_RISK_KEY = 'tmAdvisor_restBanRisk';
+  const PENDING_VERIFY_KEY = 'tmAdvisor_pendingVerify';
+
+  // TM fills its `players` / `on_field_assoc` globals asynchronously (tactics_init posts
+  // tactics_get.ajax.php after load), so at document-end they are still empty — a read-back
+  // that trusted them saw every filled slot as empty. We fetch the same endpoint ourselves.
+  const onTacticsPage = () => location.pathname.startsWith('/tactics') && !!window.jQuery;
+  let tacticsPageData = null; // last tactics_get.ajax.php reply: { players, formation_assoc, ... }
+  let tacticsPageFailed = false; // one failed read → fall back to the cached squad, never loop
+  async function loadTacticsPage() {
+    const txt = await tmPost('/ajax/tactics_get.ajax.php', tmBase());
+    const data = JSON.parse(txt);
+    if (!data || !data.players) throw new Error('tactics_get returned no squad');
+    tacticsPageData = data;
+    return data;
+  }
+  const restBanRisk = () => { try { return localStorage.getItem(REST_BAN_RISK_KEY) === '1'; } catch (e) { return false; } };
+
+  // The tactics page's own `players` global in our squad shape. It is the freshest source for
+  // THIS match: bans, injuries and the yellow-card "ban risk" icon all live on it.
+  const TP_SKILL = {
+    strength: 'str', stamina: 'sta', pace: 'pac', marking: 'mar', tackling: 'tac', workrate: 'wor', positioning: 'pos',
+    passing: 'pas', crossing: 'cro', technique: 'tec', heading: 'hea', finishing: 'fin', longshots: 'lon', set_pieces: 'set',
+    handling: 'han', one_on_ones: 'one', reflexes: 'ref', aerial_ability: 'ari', jumping: 'jum', communication: 'com', kicking: 'kic', throwing: 'thr',
+  };
+  function tacticsPageSquad() {
+    if (!onTacticsPage() || !tacticsPageData) return null;
+    const star = v => typeof v === 'number' ? v : Number((String(v).match(/alt='(\d+)'/) || [])[1] || v); // star skills are <img alt='19|20'>
+    return Object.values(tacticsPageData.players).map(p => {
+      const skills = {};
+      (p.skills || []).forEach(s => { if (TP_SKILL[s.key]) skills[TP_SKILL[s.key]] = star(s.value); });
+      return {
+        id: String(p.player_id), name: p.name, fp: p.fp, age: Number(p.age) + (Number(p.months) || 0) / 12,
+        asi: Number(String(p.skill_index).replace(/,/g, '')), routine: Number(p.routine) || 0,
+        ban: p.banned ? '1' : '0', inj: String(p.injury) === '0' ? null : p.injury,
+        banRisk: /yellow_card/.test(p.status_no_check || ''), skills, plot: [],
+      };
+    });
+  }
+
+  function planToTactic(plan) {
+    const onField = Object.fromEntries(TACTIC_KEYS.map(k => [k, '0']));
+    plan.best.lineup.forEach(l => { if (l.player) onField[l.slot] = String(l.player.id); });
+    plan.bench.named.forEach(b => { if (b.player) onField[b.key] = String(b.player.id); });
+    const r = plan.roles;
+    [['captain', r.captain], ['corner', r.corner], ['penalty', r.penalty], ['freekick', r.freeKick]].forEach(([k, p]) => { if (p) onField[k] = String(p.id); });
+    const orders = plan.condOrders.map(o => ({
+      EVENT_ID: String(o.eventId), EVENT_PAR: String(o.eventPar), COND_ID: String(o.condId), COND_PAR: String(o.condPar),
+      ORDER_ID: String(o.orderId), ORDER_PAR1: String(o.par1), ORDER_PAR2: String(o.par2 != null ? o.par2 : 0), ORDER_PAR3: o.par3 != null ? String(o.par3) : null,
+    }));
+    return { onField, mentality: String(plan.settings.mentality), style: String(plan.settings.style), focus: String(plan.settings.focus), orders };
+  }
+
+  const tmPost = (url, data) => new Promise((resolve, reject) =>
+    window.jQuery.post(url, data, resolve, 'text').fail((x, status, err) => reject(new Error(url + ': ' + (err || status)))));
+  const tmBase = () => ({ reserves: window.reserves, national: window.national, miniGameId: window.miniGameId });
+
+  // Saved orders come from the endpoint, not the page global, which can lag behind a save.
+  async function fetchCondOrders() {
+    const txt = await tmPost('/ajax/tactics_co_get.ajax.php', { get: 'cond_orders', ...tmBase() });
+    try { return JSON.parse(txt) || []; } catch (e) { return window.cond_orders || []; }
+  }
+  async function readSavedTactic() {
+    const $ = window.jQuery;
+    const assoc = (await loadTacticsPage()).formation_assoc || {};
+    return {
+      onField: Object.fromEntries(TACTIC_KEYS.map(k => [k, String(assoc[k] || '0')])),
+      mentality: String($('#mentality_select').val()), style: String($('#attacking_select').val()), focus: String($('#focus_side_select').val()),
+      orders: (await fetchCondOrders()).slice(0, 5),
+    };
+  }
+
+  async function writeTactic(state, current) {
+    const placed = new Set(POSITION_KEYS.map(k => state.onField[k]).filter(v => v !== '0'));
+    const moves = {};
+    POSITION_KEYS.forEach(k => { if (state.onField[k] !== '0') moves[state.onField[k]] = k; });
+    POSITION_KEYS.forEach(k => { const old = current.onField[k]; if (old !== '0' && !placed.has(old)) moves[old] = 'out'; });
+    // One post carries XI + bench + roles: the server takes the roles from `on_field`.
+    await tmPost('/ajax/tactics_post.ajax.php', { on_field: state.onField, players: moves, ...tmBase() });
+    for (const [save, value] of [['mentality', state.mentality], ['attacking', state.style], ['focus', state.focus]]) {
+      await sleep(150);
+      await tmPost('/ajax/tactics_post.ajax.php', { save, value, club_id: SESSION.id, ...tmBase() });
+    }
+    for (let i = 0; i < state.orders.length; i++) {
+      await sleep(150);
+      // Keep the slot's existing record (its ID) so TM updates it in place.
+      const slot = current.orders[i] || { TEAM_ID: String(SESSION.id), COND_ORDER_NUM: String(i) };
+      await tmPost('/ajax/tactics_co_post.ajax.php', { ...slot, ...state.orders[i], ...tmBase() });
+    }
+  }
+
+  function tacticMismatches(state, saved) {
+    const out = [];
+    TACTIC_KEYS.forEach(k => { if (saved.onField[k] !== state.onField[k]) out.push(k); });
+    ['mentality', 'style', 'focus'].forEach(k => { if (saved[k] !== state[k]) out.push(k); });
+    state.orders.forEach((o, i) => {
+      const s = saved.orders[i] || {};
+      if (ORDER_FIELDS.some(f => String(s[f] == null ? '' : s[f]) !== String(o[f] == null ? '' : o[f]))) out.push('order ' + (i + 1));
+    });
+    return out;
+  }
+
+  // Apply (or undo): back up what's saved now, write, then reload — the check runs on the
+  // fresh page (verifyPendingApply), so it reads what TM really stored, not our own variables.
+  async function saveTacticAndVerify(state, label, backup) {
+    const current = await readSavedTactic();
+    if (backup) setSlice('tacticsBackup', current);
+    await writeTactic(state, current);
+    sessionStorage.setItem(PENDING_VERIFY_KEY, JSON.stringify({ state, label }));
+    location.reload();
+  }
+
+  async function verifyPendingApply() {
+    let pending = null;
+    try { pending = JSON.parse(sessionStorage.getItem(PENDING_VERIFY_KEY)); } catch (e) {}
+    if (!pending) return;
+    sessionStorage.removeItem(PENDING_VERIFY_KEY);
+    for (let i = 0; i < 20 && !window.jQuery; i++) await sleep(250);
+    let mismatches;
+    try { mismatches = onTacticsPage() ? tacticMismatches(pending.state, await readSavedTactic()) : ['tactics page did not load']; }
+    catch (e) { mismatches = ['read-back failed: ' + e.message]; }
+    setSlice('tacticsApplied', { label: pending.label, ok: !mismatches.length, mismatches });
+    if (document.getElementById('tma-body') && document.querySelector('.tma-tab.active')?.dataset.tab === 'tactics') renderTactics();
+  }
+
+  // Human-readable differences between what's saved and the plan, for the Preview list.
+  function tacticDiff(state, saved) {
+    const nameOf = id => { const p = tacticsPageData && Object.values(tacticsPageData.players).find(x => String(x.player_id) === String(id)); return p ? p.name : (id === '0' ? '—' : id); };
+    const rows = [];
+    TACTIC_KEYS.forEach(k => {
+      if (saved.onField[k] !== state.onField[k]) rows.push([k.toUpperCase(), nameOf(saved.onField[k]), nameOf(state.onField[k])]);
+    });
+    [['Mentality', 'mentality', MENTALITY], ['Style', 'style', ATT_STYLE], ['Focus', 'focus', FOCUS_SIDE]].forEach(([label, k, names]) => {
+      if (saved[k] !== state[k]) rows.push([label, names[saved[k]] || saved[k], names[state[k]] || state[k]]);
+    });
+    const desc = o => {
+      if (!o || !Number(o.ORDER_ID)) return '—';
+      const d = describeCondOrder({ eventId: Number(o.EVENT_ID), eventPar: o.EVENT_PAR, condId: Number(o.COND_ID), condPar: Number(o.COND_PAR), orderId: Number(o.ORDER_ID), par1: o.ORDER_PAR1, par3: o.ORDER_PAR3, inName: nameOf(o.ORDER_PAR2), outName: nameOf(o.ORDER_PAR1) });
+      return `${d.event}, ${d.score}: ${d.order}`;
+    };
+    state.orders.forEach((o, i) => {
+      const s = saved.orders[i] || {};
+      if (ORDER_FIELDS.some(f => String(s[f] == null ? '' : s[f]) !== String(o[f] == null ? '' : o[f]))) rows.push(['Order ' + (i + 1), desc(s), desc(o)]);
+    });
+    return rows;
+  }
+
+  /* ============================================================
    *  SECTION 6 — STADIUM ENGINE
    * ============================================================ */
 
@@ -3205,11 +3367,19 @@
     const oppSlice = getSlice('opponent');
     const scoutSlice = getSlice('opponentScouting');
     const expectedSlice = getSlice('opponentExpected');
-    if (!playersSlice) {
-      body.innerHTML = `<div class="tma-card"><h4>No squad data yet</h4></div>`;
+    if (onTacticsPage() && !tacticsPageData && !tacticsPageFailed) {
+      body.innerHTML = `<div class="tma-card"><h4>Reading your tactics page…</h4></div>`;
+      loadTacticsPage().catch(e => { tacticsPageFailed = true; console.warn('TM Advisor: tactics_get failed', e); }).then(() => {
+        if (document.querySelector('.tma-tab.active')?.dataset.tab === 'tactics') renderTactics();
+      });
       return;
     }
-    const plan = buildMatchPlan(playersSlice.data, oppSlice && oppSlice.data, scoutSlice && scoutSlice.data, expectedSlice && expectedSlice.data);
+    const squad = tacticsPageSquad() || (playersSlice && playersSlice.data);
+    if (!squad) {
+      body.innerHTML = `<div class="tma-card"><h4>No squad data yet</h4><div class="tma-mini">Open your Players or Tactics page once.</div></div>`;
+      return;
+    }
+    const plan = buildMatchPlan(squad, oppSlice && oppSlice.data, scoutSlice && scoutSlice.data, expectedSlice && expectedSlice.data, { restBanRisk: restBanRisk() });
     const { players, best, settings, bench, roles } = plan;
     const startingPlayers = best.lineup.filter(l => l.player).map(l => l.player);
 
@@ -3277,6 +3447,7 @@
       </div>` : '';
 
     body.innerHTML = `
+      ${applyCardHtml(squad)}
       <div class="tma-card">
         <h4>Recommended Formation: ${best.formation} <span class="tma-badge">Avg R5 ${(best.totalRec / startingPlayers.length).toFixed(1)}</span></h4>
         ${best.alternatives.length ? `<div class="tma-mini" style="margin-bottom:6px;">${best.alternatives.join(', ')} ${best.alternatives.length > 1 ? 'are' : 'is'} within 1% — for this squad the shape barely matters; who plays where does.</div>` : ''}
@@ -3301,12 +3472,91 @@
       </div>
       <div class="tma-card">
         <h4>Conditional Orders (set before kickoff) <span class="tma-badge">5 / 5 used</span></h4>
-        <div class="tma-mini" style="margin-bottom:8px;">Enter these in TM's Conditional Order screen exactly as shown — each is one Event, one Score state, and one single Order. Substitutes come on in a free slot of their own line, so they play their natural position.</div>
+        <div class="tma-mini" style="margin-bottom:8px;">${onTacticsPage() ? 'Saved by Apply above.' : 'Apply saves these for you on the Tactics page.'} Substitutes come on in a free slot of their own line, so they play their natural position.</div>
         ${condOrdersHtml}
       </div>
       ${expectedTacticsHtml}
       ${trainingHtml}
     `;
+    bindApplyCard(plan);
+  }
+
+  // Mentality, focus and the orders all hinge on the opponent, so Apply is only offered once
+  // the scanned squad is the one we actually play next — otherwise mentality silently falls
+  // back to Normal (seen live: it would have flipped Defensive → Normal v a much stronger side).
+  function opponentReadiness() {
+    const opp = getSlice('opponent');
+    const nm = getSlice('home') && getSlice('home').data && getSlice('home').data.nextMatch;
+    const nextOpp = nm ? (String(nm.home.id) === clubId ? nm.away : nm.home) : null;
+    if (!opp || !opp.data) return { ready: false, text: 'No opponent scanned — the plan would assume an even match.' };
+    if (nextOpp && String(nextOpp.id) !== String(opp.data.id)) return { ready: false, text: `Scanned ${opp.data.name || 'an old opponent'}, but you play ${nextOpp.name} next.` };
+    if (!nextOpp) return { ready: false, text: `Scanned ${opp.data.name || 'an opponent'}, but your next fixture isn't known yet.` };
+    return { ready: true, text: `Planned against ${opp.data.name} · scanned ${ago(opp.t)}` + (opp.data.source === 'star-estimate' ? ' (star estimate)' : '') };
+  }
+
+  // Top card of the Tactics view. On /tactics/ it previews and applies the plan; elsewhere it
+  // just points there. The diff needs the saved orders (an AJAX read), so it fills in after.
+  function applyCardHtml(squad) {
+    if (!onTacticsPage()) {
+      return `<div class="tma-card"><h4>Apply this plan</h4><div class="tma-mini">Open the <a href="/tactics/" style="color:var(--tma-gold);">Tactics page</a> to preview and save it in one click.</div></div>`;
+    }
+    const last = getSlice('tacticsApplied');
+    const recent = last && now() - last.t < 10 * 60e3;
+    const result = !recent ? '' : last.data.ok
+      ? `<div class="tma-row"><span class="tma-goodval">✔ ${esc(last.data.label)} — saved and verified</span><span class="tma-mini">${ago(last.t)}</span></div>`
+      : `<div class="tma-row" style="color:var(--tma-red);">⚠ ${esc(last.data.label)}: not saved — ${esc(last.data.mismatches.join(', '))}</div>`;
+    const opp = opponentReadiness();
+    const oppLine = `<div class="tma-row"><span class="${opp.ready ? 'tma-mini' : ''}" style="${opp.ready ? '' : 'color:var(--tma-amber);'}">${opp.ready ? '' : '⚠ '}${esc(opp.text)}</span>
+      <button class="tma-btn secondary" id="tma-scan-opp" style="width:auto;margin:0;padding:4px 10px;">${opp.ready ? 'Rescan' : 'Scan next opponent'}</button></div>`;
+    const risky = squad.filter(p => p.banRisk && p.ban !== '1');
+    const restToggle = risky.length ? `
+      <label class="tma-mini" style="display:flex;gap:6px;align-items:center;margin:6px 0;cursor:pointer;">
+        <input type="checkbox" id="tma-restban" ${restBanRisk() ? 'checked' : ''}>
+        Rest players one card from a ban (${risky.map(p => esc(p.name.split(' ').pop())).join(', ')})
+      </label>` : '';
+    return `
+      <div class="tma-card" id="tma-apply-card">
+        <h4>Apply to this tactics page <span class="tma-badge" id="tma-apply-count">checking…</span></h4>
+        ${result}
+        ${oppLine}
+        ${restToggle}
+        <details id="tma-apply-preview"><summary class="tma-mini" style="cursor:pointer;">Preview changes</summary><div id="tma-apply-diff" class="tma-mini">Reading what's saved…</div></details>
+        <button class="tma-btn" id="tma-apply" disabled>Apply plan</button>
+        ${getSlice('tacticsBackup') ? '<button class="tma-btn secondary" id="tma-undo">Undo last apply</button>' : ''}
+        <div class="tma-progress" id="tma-apply-status"></div>
+      </div>`;
+  }
+
+  function bindApplyCard(plan) {
+    if (!onTacticsPage()) return;
+    const state = planToTactic(plan);
+    const status = document.getElementById('tma-apply-status');
+    const restBox = document.getElementById('tma-restban');
+    if (restBox) restBox.addEventListener('change', () => { try { localStorage.setItem(REST_BAN_RISK_KEY, restBox.checked ? '1' : '0'); } catch (e) {} renderTactics(); });
+    readSavedTactic().then(saved => {
+      const rows = tacticDiff(state, saved);
+      const count = document.getElementById('tma-apply-count'), diff = document.getElementById('tma-apply-diff'), btn = document.getElementById('tma-apply');
+      if (!count) return; // view was re-rendered meanwhile
+      count.textContent = rows.length ? rows.length + ' change' + (rows.length > 1 ? 's' : '') : 'up to date';
+      diff.innerHTML = rows.length
+        ? rows.map(([what, from, to]) => `<div class="tma-row"><span>${esc(what)}</span><span>${esc(from)} → <b>${esc(to)}</b></span></div>`).join('')
+        : 'The saved tactic already matches this plan.';
+      btn.disabled = !rows.length || !opponentReadiness().ready;
+    }).catch(e => { status.textContent = 'Could not read the saved tactic: ' + e.message; });
+    const run = (label, fn) => async () => {
+      document.querySelectorAll('#tma-apply-card .tma-btn').forEach(b => { b.disabled = true; });
+      status.textContent = label + '…';
+      try { await fn(); } catch (e) { status.textContent = label + ' failed: ' + e.message + ' — reload the page to see what was saved.'; }
+    };
+    bindBtn('tma-scan-opp', run('Scanning next opponent', async () => {
+      await refreshAll((key, st) => { status.textContent = 'Scanning: ' + key + ' ' + st; });
+      renderTactics();
+    }));
+    bindBtn('tma-apply', run('Applying plan', () => saveTacticAndVerify(state, 'Plan applied', true)));
+    bindBtn('tma-undo', run('Undoing', () => {
+      const b = getSlice('tacticsBackup').data;
+      return saveTacticAndVerify({ ...b, orders: b.orders.map(o => Object.fromEntries(ORDER_FIELDS.map(f => [f, o[f]]))) }, 'Undo', false);
+    }));
   }
 
   function renderStadiumTab() {
@@ -3677,6 +3927,7 @@
     injectStyle();
     if (!dockDisabledHere()) buildPanel();
     autoCaptureCurrentPage();
+    if (location.pathname.startsWith('/tactics')) verifyPendingApply();
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') boot();
