@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.13.0
+// @version      3.13.1
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -634,15 +634,39 @@
     raw.split(',').forEach(segRaw => {
       const seg = segRaw.trim();
       if (!seg) return;
-      const m = seg.match(/^([A-Z/]+?)\s*([LCR])?$/);
+      // Side group is 1+ letters: "D LR" is a left AND right back. Reading only one letter made
+      // "D LR" parse as "dlr", which fell through to the DC weights.
+      const m = seg.match(/^([A-Z/]+?)\s*([LCR]*)$/);
       const posPart = (m ? m[1] : seg).replace(/\s+/g, '');
-      const side = m && m[2] ? m[2] : '';
-      posPart.split('/').filter(Boolean).forEach(part => {
+      const sides = m && m[2] ? m[2].split('') : [''];
+      posPart.split('/').filter(Boolean).forEach(part => sides.forEach(side => {
         codes.push(part === 'F' ? 'f' : (part + side).toLowerCase());
-      });
+      }));
     });
-    return codes.length ? codes : ['mc'];
+    return codes.length ? [...new Set(codes)] : ['mc'];
   }
+
+  // Tooltip and youth endpoints send position CODES ("mr,ml", "dl,dml", "omc,fc"); everything
+  // else (players_ar, the tactics page, tmPositionPenalty) uses TM's display form ("M LR",
+  // "D/DM L", "OM C, F"). Read as display strings, codes silently zeroed the out-of-position
+  // penalty — seen live: a pure right-back "starting" at centre DM with no penalty.
+  const isPositionCodes = fp => /^[a-z]{1,4}(\s*,\s*[a-z]{1,4})*$/.test(String(fp || '').trim());
+  function fpFromCodes(codes) {
+    const parts = String(codes || '').toLowerCase().split(',').map(c => c.trim()).filter(Boolean);
+    if (!parts.length) return '';
+    if (parts.includes('gk')) return 'GK';
+    const parsed = parts.map(c => {
+      if (c.startsWith('f')) return { line: 'F', side: '' };
+      const m = c.match(/^(dm|om|d|m)([lcr])/);
+      return m ? { line: m[1].toUpperCase(), side: m[2].toUpperCase() } : null;
+    }).filter(Boolean);
+    const outfield = parsed.filter(x => x.line !== 'F');
+    if (!outfield.length) return 'F';
+    const lines = [...new Set(outfield.map(x => x.line))];
+    const sides = [...new Set(outfield.map(x => x.side))].sort((a, b) => 'LCR'.indexOf(a) - 'LCR'.indexOf(b)).join('');
+    return lines.join('/') + ' ' + sides + (outfield.length < parsed.length ? ', F' : ''); // TM writes "D LR", "D/DM L", "OM C, F"
+  }
+  const displayFp = fp => isPositionCodes(fp) ? fpFromCodes(fp) : fp;
 
   // Ordered skill arrays the formula expects, per position type.
   function outfieldSkillArray(s) {
@@ -1447,16 +1471,8 @@
   };
   const OUTFIELD_KEYS = ['str', 'sta', 'pac', 'mar', 'tac', 'wor', 'pos', 'pas', 'cro', 'tec', 'hea', 'fin', 'lon', 'set'];
   const GK_KEYS = ['str', 'sta', 'pac', 'han', 'one', 'ref', 'ari', 'jum', 'com', 'kic', 'thr'];
-  // "dmc" / "dl,dml" → our "DM C" / "D L" favourite-position format (first listed position).
-  function fpFromCode(code) {
-    const c = String(code || '').split(',')[0].trim().toLowerCase();
-    if (c === 'gk') return 'GK';
-    if (c.startsWith('f')) return 'F';
-    const m = c.match(/^(dm|om|d|m)([lcr])/);
-    return m ? m[1].toUpperCase() + ' ' + m[2].toUpperCase() : 'M C';
-  }
   function gradeYouthRecruit(raw) {
-    const fp = fpFromCode(raw.favposition);
+    const fp = fpFromCodes(raw.favposition) || 'M C';
     const isGK = fp === 'GK', keys = isGK ? GK_KEYS : OUTFIELD_KEYS;
     const skills = {};
     keys.forEach(k => { const v = YOUTH_SKILL_KEYS[k].map(n => raw[n]).find(x => x != null && x !== ''); skills[k] = Number(v); });
@@ -1544,7 +1560,7 @@
     // for a precise decimal age rather than rounding down to the nearest year.
     const months = raw.months != null ? parseInt(raw.months, 10) || 0 : 0;
     return {
-      id: raw.id, name: raw.name || 'Unknown', fp: raw.favposition || '',
+      id: raw.id, name: raw.name || 'Unknown', fp: displayFp(raw.favposition || ''),
       age: raw.age != null && raw.age !== '' ? parseFloat(raw.age) + months / 12 : null,
       ageMonths: raw.age != null && raw.age !== '' ? Math.round(parseFloat(raw.age) * 12 + months) : null,
       asi: parseNumericString(raw.skill_index), routine: parseNumericString(raw.routine) || 0,
@@ -2439,8 +2455,10 @@
       if (!p || p.id == null) return;
       const key = String(p.id);
       if (seen[key]) return;
-      ensureR5(p);
-      seen[key] = { ...p, _src: srcLabel };
+      const fixed = { ...p, fp: displayFp(p.fp) };
+      if (fixed.fp !== p.fp) delete fixed._r5; // R5 was computed for the misread position
+      ensureR5(fixed);
+      seen[key] = { ...fixed, _src: srcLabel };
     };
     const transferSeen = getSlice('transferSeen');
     if (transferSeen && transferSeen.data) Object.values(transferSeen.data).forEach(p => add(p, 'Transfer list'));

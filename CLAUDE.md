@@ -21,6 +21,7 @@ Single-file Tampermonkey userscript (`TM_Advisor.js`) for trophymanager.com. One
 - `/ajax/match.ajax.php?id=` — lineups + mentality/style/focus per side, full match_data
 - `/ajax/scouts_get_reports.ajax.php` — scout rec/potential for your reported players
 - `/ajax/tooltip.ajax.php` — per-player skills/SI/routine/wage (precise age incl. months)
+- Favourite positions arrive in TWO formats: display (`players_ar`, tactics page, players_get_select: "D/DM L", "M LR", "OM C, F") and codes (tooltip.ajax, youth.ajax: "dl,dml", "mr,ml"). Engine code expects display — convert at ingestion with `displayFp`. Codes read as display silently zero TM's position penalty (seen live).
 - `players_get_select` field traps: name is `player_name` (no `name`); stars are `rec_count` — `rec` is an unrelated raw ≈14 figure. Match-report line-ups (`match.ajax.php`) carry `rec` in stars + `routine` + `position` (slot) per player, also pre-match for the next fixture.
 - `/ajax/fixtures.ajax.php` POST `type=club&var1=<clubId>` (or `type=league&var1=<country>&var2=<div>&var3=<group>`) — `{ "YYYY-MM": { matches: [{id, date, hometeam, awayteam, result, matchtype}] } }`; unplayed = no `result`
 - `/ajax/youth.ajax.php` POST `{type:'get'}` (the page's own load call, read-only) → `{players: {id: {player_name, favposition 'dc'|'gk'…, age, wage, fee, strength…/handling…/aerial/oneonones}}, cash, squad_size}`; skills are hidden until revealed; NO SI. Cards render as `div.youth_player#youth_player_<id>` (not table rows). Reports arrive weekly (Saturday).
