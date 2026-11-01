@@ -34,7 +34,7 @@ TM Advisor answers all of these — automatically, on every page — using only 
 - **Fixture difficulty** — rates each upcoming match Comfortable / Even / Tough from the opponent's best-XI R5, so you know which weeks deserve real prep.
 - **One-click Apply** — on the Tactics page, preview every change (XI, bench, captain/set-piece takers, mentality/style/focus, all 5 conditional orders) and save it in one click. The script then reloads the page and reads every value back to confirm it really saved; **Undo** restores the previous tactic. Apply stays disabled until the opponent you've scanned is your actual next fixture, and a toggle rests players who are one yellow card from a ban.
 - **Learns from your division's results** — reads every played match report in your division (both line-ups, each side's mentality/style/focus, the score) and fits one result model on strength. Mentality and style only change from the built-in rules when other teams' results in *your* situation (underdog / even / favourite) clearly favour something else; the card shows the evidence, your predicted result, and how past predictions turned out.
-- **Autopilot (off by default)** — switch it on from the Dashboard and the script applies the match plan before each match whenever you open any TM page: once per match, never within an hour of kickoff, only after scanning the actual next opponent, and every save is read back. A dry-run mode logs what it would change without saving anything.
+- **Autopilot (off by default)** — switch it on from the Dashboard and the script applies the match plan before each match whenever you open any TM page: once per match, never once tactics are about to lock (TM locks them roughly an hour before kickoff; times are read on the game's own clock, whatever your time zone), only after scanning the actual next opponent, and every save is read back. A dry-run mode logs what it would change without saving anything.
 - **Captain & set pieces** — picked from the XI you'll actually field: takers ranked by the same skill sums the R5 formula uses for its set-piece bonuses; captain = most experienced (highest routine, a labelled heuristic).
 - **Conditional orders** — generates 5 position-aware substitution orders with exact timing and what to assign on the TM sub screen.
 - **Opponent scouting** — reads the next match's expected formation and tactics from the game's own data. Also compiles the opponent's usual formation/mentality/style from their last 5 matches.
@@ -126,7 +126,7 @@ The floating panel shows **one tab at a time** — whichever matches the page yo
 | League | League squad strength |
 | Match pages | Dashboard (with match stats) |
 
-**Match-day status, always visible** — even collapsed, the dock's header reads e.g. *"v Mashau · in 5h 12m · ✔ tactic set"*, turning amber (*"⚠ tactic not set"*) when no plan has been applied for the next match.
+**Match-day status, always visible** — even collapsed, the dock's header reads e.g. *"v Mashau · 19:00 · locks in 4h 54m · ✔ tactic set"* (game time), turning amber (*"⚠ tactic not set"*) when no plan has been applied for the next match.
 
 The dock hides itself on `/players/`, `/club/` and `/youth-development/`, where the game page itself is enhanced instead: Rou/SI/R5 columns on your Players page and on every squad overview (yours included), a stat card on player profiles, and a **STAR / KEEP / MAYBE / RELEASE** badge on each youth-report recruit once its skills are revealed.
 

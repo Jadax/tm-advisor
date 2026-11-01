@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.13.1
+// @version      3.13.2
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -3059,7 +3059,11 @@
 
   const AUTOPILOT_KEY = 'tmAdvisor_autopilot'; // { enabled, dryRun }
   const AUTOPILOT_GAP_MS = 20 * 60e3;
-  const KICKOFF_MARGIN_MS = 60 * 60e3; // kickoff is shown without a timezone — an hour covers the skew
+  // Tactics lock ~1 h before kickoff: TM simulates the match ahead of time — the community script
+  // "Match stats and actions 51 minutes before match" (TM Guide/) already reads the finished
+  // report 51 min out. 60 min is the user-reported lock; the autopilot keeps 10 min on top.
+  const TACTICS_LOCK_MS = 60 * 60e3;
+  const AUTOPILOT_SAFETY_MS = 10 * 60e3;
   const autopilotPrefs = () => { try { return JSON.parse(localStorage.getItem(AUTOPILOT_KEY)) || {}; } catch (e) { return {}; } };
   function setAutopilotPrefs(p) {
     try { localStorage.setItem(AUTOPILOT_KEY, JSON.stringify(p)); } catch (e) {}
@@ -3067,17 +3071,38 @@
     setSlice('autopilot', { ...(st && st.data), doneMatchId: null, lastTry: 0 }); // a changed switch earns a fresh run
   }
 
-  // Home page shows e.g. "National First Division Group 2, 1. November 19:00" (no year).
+  // TM shows every time in ITS zone (live 2026-11-01: an hour behind South Africa). Each page
+  // renders the server clock as static text in #tm_clock, so (that clock − ours) at render time
+  // is the offset, rounded to the 15-minute grid real time zones use.
+  function measureTmOffset(doc) {
+    const el = doc && doc.getElementById ? doc.getElementById('tm_clock') : null;
+    const m = el && el.textContent.trim().match(/^(\d{1,2}):(\d{2}):(\d{2})$/);
+    if (!m) return null;
+    const d = new Date();
+    let diff = (+m[1] * 60 + +m[2] + +m[3] / 60) - (d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60);
+    if (diff > 720) diff -= 1440;
+    if (diff <= -720) diff += 1440;
+    const offsetMin = Math.round(diff / 15) * 15;
+    setSlice('tmClock', { offsetMin });
+    return offsetMin;
+  }
+  const tmOffsetMin = () => { const s = getSlice('tmClock'); return s && s.data && typeof s.data.offsetMin === 'number' ? s.data.offsetMin : null; };
+
+  // Home page shows e.g. "National First Division Group 2, 1. November 19:00" (no year), in TM
+  // time. Returns a real timestamp, or null: an unknown offset or unreadable text means callers
+  // must not act on a kickoff they can't place.
   const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
   function parseKickoff(when) {
     const m = String(when || '').match(/(\d{1,2})\.\s*([A-Za-z]+)\s+(\d{1,2}):(\d{2})/);
     const month = m ? MONTHS.indexOf(m[2].toLowerCase()) : -1;
-    if (month < 0) return null;
+    const offset = tmOffsetMin();
+    if (month < 0 || offset == null) return null;
     const today = new Date();
     const d = new Date(today.getFullYear(), month, +m[1], +m[3], +m[4]);
     if (today - d > 180 * 864e5) d.setFullYear(d.getFullYear() + 1); // a January fixture seen in December
-    return d.getTime();
+    return d.getTime() - offset * 60e3; // TM wall clock -> real instant
   }
+  const tmTimeOf = when => (String(when || '').match(/\d{1,2}:\d{2}/) || [''])[0];
 
   function autopilotLog(msg, ok, extra) {
     const entry = { t: now(), msg, ok, ...(extra || {}) };
@@ -3093,7 +3118,9 @@
     if (!force && state.lastTry && now() - state.lastTry < AUTOPILOT_GAP_MS) return null;
     setSlice('autopilot', { ...state, lastTry: now() }); // claimed first, so a second open tab backs off
     try {
-      const home = parseHome(await fetchDoc('/home/'));
+      const homeDoc = await fetchDoc('/home/');
+      measureTmOffset(homeDoc); // fresh render = an exact clock reading
+      const home = parseHome(homeDoc);
       setSlice('home', home);
       const nm = home.nextMatch;
       const matchId = nm && nm.matchUrl ? (nm.matchUrl.match(/\/matches\/(\d+)/) || [])[1] : null;
@@ -3102,7 +3129,7 @@
       const vs = nm.home && String(nm.home.id) === clubId ? nm.away.name : nm.home.name;
       const kickoff = parseKickoff(nm.when);
       if (!kickoff) return autopilotLog(`Kickoff time unreadable ("${nm.when}") — nothing saved.`, false, { matchId });
-      if (kickoff - now() < KICKOFF_MARGIN_MS) return autopilotLog(`Less than an hour to kickoff v ${vs} — nothing saved.`, false, { matchId });
+      if (kickoff - now() < TACTICS_LOCK_MS + AUTOPILOT_SAFETY_MS) return autopilotLog(`Too close to the ${tmTimeOf(nm.when)} kickoff v ${vs}: tactics lock an hour before — nothing saved.`, false, { matchId });
       await refreshAll(); // next opponent's squad + recent tactics + expected line-up
       const ready = opponentReadiness();
       if (!ready.ready) return autopilotLog(ready.text + ' — nothing saved.', false, { matchId });
@@ -3639,21 +3666,26 @@
     const opp = String(nm.home.id) === clubId ? nm.away : nm.home;
     const matchId = nm.matchUrl ? (nm.matchUrl.match(/\/matches\/(\d+)/) || [])[1] : null;
     const preds = (getSlice('predictions') || { data: {} }).data || {};
-    return { opp, matchId, kickoff: parseKickoff(nm.when), home: opp === nm.away, applied: !!(matchId && preds[matchId]), prediction: matchId ? preds[matchId] : null };
+    const kickoff = parseKickoff(nm.when);
+    return { opp, matchId, kickoff, lockAt: kickoff ? kickoff - TACTICS_LOCK_MS : null, tmTime: tmTimeOf(nm.when), home: opp === nm.away, applied: !!(matchId && preds[matchId]), prediction: matchId ? preds[matchId] : null };
   }
-  function kickoffText(ko) {
-    if (!ko) return '';
-    const mins = Math.round((ko - now()) / 60e3);
-    if (mins < 0) return 'kicked off';
-    if (mins < 60) return `in ${mins}m`;
-    if (mins < 24 * 60) return `in ${Math.floor(mins / 60)}h ${mins % 60}m`;
-    return new Date(ko).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }) + ' ' + new Date(ko).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  // "19:00 · locks in 4h 50m": the game's own kickoff time, counting down to the lock.
+  function kickoffText(m) {
+    if (!m || !m.kickoff) return m && m.tmTime ? m.tmTime : '';
+    const toLock = Math.round((m.lockAt - now()) / 60e3);
+    let rest;
+    if (now() >= m.kickoff) rest = 'kicked off';
+    else if (toLock <= 0) rest = 'locked';
+    else if (toLock < 60) rest = `locks in ${toLock}m`;
+    else if (toLock < 24 * 60) rest = `locks in ${Math.floor(toLock / 60)}h ${toLock % 60}m`;
+    else rest = new Date(m.kickoff).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+    return (m.tmTime ? m.tmTime + ' · ' : '') + rest;
   }
   function matchStatusHtml() {
     const m = nextMatchInfo();
     if (!m) return '';
     const name = m.opp.name && m.opp.name.length > 18 ? m.opp.name.slice(0, 17) + '…' : (m.opp.name || '?');
-    const when = kickoffText(m.kickoff);
+    const when = kickoffText(m);
     return `<span class="tma-status ${m.applied ? 'ok' : 'warn'}" title="${m.applied ? 'A plan was applied for this match' : 'No plan applied for this match yet — open Tactics'}">v ${esc(name)}${when ? ' · ' + when : ''} · ${m.applied ? '✔ tactic set' : '⚠ tactic not set'}</span>`;
   }
   function refreshMatchStatus() {
@@ -3746,7 +3778,7 @@
     const nmi = nextMatchInfo();
     const nmHtml = nm ? `
       <div class="tma-row" style="font-weight:700;"><span>${esc(nm.home.name)}</span><span class="tma-mini">vs</span><span>${esc(nm.away.name)}</span></div>
-      <div class="tma-row"><span class="tma-mini">${esc(nm.when || '')}</span><span class="tma-mini">${nmi ? kickoffText(nmi.kickoff) : ''}</span></div>
+      <div class="tma-row"><span class="tma-mini">${esc(nm.when || '')}</span><span class="tma-mini">${nmi ? esc(kickoffText(nmi)) : ''}</span></div>
       ${nmi && nmi.prediction ? `<div class="tma-row"><span>Expected (model)</span><span class="tma-goodval">${nmi.prediction.gd >= 0 ? '+' : ''}${nmi.prediction.gd.toFixed(1)} goals</span></div>` : ''}
       <div class="tma-row"><span>Tactic</span><span style="color:${nmi && nmi.applied ? 'var(--tma-lime)' : 'var(--tma-amber)'};font-weight:700;">${nmi && nmi.applied ? '✔ applied for this match' : '⚠ not applied yet'}</span></div>
       <a class="tma-btn" href="/tactics/" style="display:block;text-align:center;text-decoration:none;">Review &amp; apply on Tactics →</a>` : `<div class="tma-mini">No data yet.</div>`;
@@ -4000,6 +4032,9 @@
     const result = !recent ? '' : last.data.ok
       ? `<div class="tma-row"><span class="tma-goodval">✔ ${esc(last.data.label)} — saved and verified</span><span class="tma-mini">${ago(last.t)}</span></div>`
       : `<div class="tma-row" style="color:var(--tma-red);">⚠ ${esc(last.data.label)}: not saved — ${esc(last.data.mismatches.join(', '))}</div>`;
+    const nmi = nextMatchInfo();
+    const lockedLine = nmi && nmi.lockAt && now() >= nmi.lockAt && now() < nmi.kickoff + 3 * 3600e3
+      ? `<div class="tma-row" style="color:var(--tma-amber);">⚠ Tactics for the ${esc(nmi.tmTime)} match are locked: TM simulates it about an hour before kickoff. Saving now only affects later matches.</div>` : '';
     const opp = opponentReadiness();
     const oppLine = `<div class="tma-row"><span class="${opp.ready ? 'tma-mini' : ''}" style="${opp.ready ? '' : 'color:var(--tma-amber);'}">${opp.ready ? '' : '⚠ '}${esc(opp.text)}</span>
       <button class="tma-btn secondary" id="tma-scan-opp" style="width:auto;margin:0;padding:4px 10px;">${opp.ready ? 'Rescan' : 'Scan next opponent'}</button></div>`;
@@ -4013,6 +4048,7 @@
       <div class="tma-card" id="tma-apply-card">
         <h4>Apply to this tactics page <span class="tma-badge" id="tma-apply-count">checking…</span></h4>
         ${result}
+        ${lockedLine}
         ${oppLine}
         ${restToggle}
         <details id="tma-apply-preview"><summary class="tma-mini" style="cursor:pointer;">Preview changes</summary><div id="tma-apply-diff" class="tma-mini">Reading what's saved…</div></details>
@@ -4424,6 +4460,7 @@
     return p.startsWith('/club/') || p.startsWith('/players') || p.startsWith('/youth-development');
   }
   function boot() {
+    measureTmOffset(document); // #tm_clock was rendered moments ago
     injectStyle();
     if (!dockDisabledHere()) buildPanel();
     autoCaptureCurrentPage();
