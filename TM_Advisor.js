@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.12.0
+// @version      3.13.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -35,7 +35,7 @@
  *   SECTION 3  NETWORK REFRESH       (fetch other pages, no nav)
  *   SECTION 4  LIVE-PAGE AUTO CAPTURE (+ Rou/SI/R5 columns on players
  *                                       & transfer tables; Keep/Release
- *                                       & youth-development recruit rows ⓘ;
+ *                                       verdict badges on youth-development cards ⓘ;
  *                                       player-profile card with
  *                                       breakdown/valuation; match-page R5
  *                                       overlay + full match stats &
@@ -1250,7 +1250,7 @@
   }
 
   // The two primitives every injected column uses — shared by the players/opponent/transfer
-  // tables (injectR5Columns) and the youth-development recruit table, so an appended cell
+  // tables (injectR5Columns), so an appended cell
   // looks and behaves the same everywhere. `chipHtml` is trusted (always built internally);
   // `text` goes through textContent, never innerHTML.
   function appendHeaderCell(headerRow, label, cls) {
@@ -1395,7 +1395,6 @@
   // The ~30 SI at 16y0m + ~0.5 SI/month maturity drift, and the star-tier ranking that adds
   // +8 SI above expectation, are OUR heuristics - comments below say "approx" and the UI
   // tooltip labels the whole read as approximate. Nothing here is a game formula.
-  const YOUTH_ROW_FETCH_CAP = 40; // a weekly pull is ~10-20 recruits; the cap is a runaway guard
   // Category sums use the exact skill groupings TM Player Enhanced (1.7.0) computes per
   // category (its playerSkillSums block), so our reach% is directly comparable to the
   // community's, and the ceilings are its PEAK_SUMS maxes.
@@ -1434,50 +1433,72 @@
     return { verdict, cls, isGK: sums.isGK,
       note: 'approx: SI ' + Math.round(si) + ' vs ~' + Math.round(expectedSI) + ' expected at ' + y + 'y' + m + 'm. Peak reach: ' + reach.join(', ') + '. Heuristic, not exact.' };
   }
+  // The weekly report arrives via /ajax/youth.ajax.php {type:'get'} (youth.js get_report — the
+  // page itself calls it on load) and renders as div#youth_player_<id> cards, NOT table rows,
+  // which is why the old row-based version never matched. Skills come in that same reply once
+  // revealed; no SI is sent, so SI is derived from the skill sum with the exact relation the R5
+  // remainder uses (Section 2B; inverse of skillSumFromSI). Read-only: never hires or fires.
+  const YOUTH_SKILL_KEYS = {
+    str: ['strength'], sta: ['stamina'], pac: ['pace'], mar: ['marking'], tac: ['tackling'], wor: ['workrate'],
+    pos: ['positioning'], pas: ['passing'], cro: ['crossing'], tec: ['technique'], hea: ['heading'], fin: ['finishing'],
+    lon: ['longshots'], set: ['setpieces', 'set_pieces'], han: ['handling'], one: ['oneonones', 'one_on_ones'],
+    ref: ['reflexes'], ari: ['aerial', 'arialability', 'aerial_ability'], jum: ['jumping'], com: ['communication'],
+    kic: ['kicking'], thr: ['throwing'],
+  };
+  const OUTFIELD_KEYS = ['str', 'sta', 'pac', 'mar', 'tac', 'wor', 'pos', 'pas', 'cro', 'tec', 'hea', 'fin', 'lon', 'set'];
+  const GK_KEYS = ['str', 'sta', 'pac', 'han', 'one', 'ref', 'ari', 'jum', 'com', 'kic', 'thr'];
+  // "dmc" / "dl,dml" → our "DM C" / "D L" favourite-position format (first listed position).
+  function fpFromCode(code) {
+    const c = String(code || '').split(',')[0].trim().toLowerCase();
+    if (c === 'gk') return 'GK';
+    if (c.startsWith('f')) return 'F';
+    const m = c.match(/^(dm|om|d|m)([lcr])/);
+    return m ? m[1].toUpperCase() + ' ' + m[2].toUpperCase() : 'M C';
+  }
+  function gradeYouthRecruit(raw) {
+    const fp = fpFromCode(raw.favposition);
+    const isGK = fp === 'GK', keys = isGK ? GK_KEYS : OUTFIELD_KEYS;
+    const skills = {};
+    keys.forEach(k => { const v = YOUTH_SKILL_KEYS[k].map(n => raw[n]).find(x => x != null && x !== ''); skills[k] = Number(v); });
+    if (keys.some(k => isNaN(skills[k]))) return { hidden: true };
+    const sum = keys.reduce((a, k) => a + skills[k], 0);
+    const asi = Math.pow(sum, 7) / (isGK ? 48717927500 : 263533760000);
+    const nums = String(raw.age == null ? '' : raw.age).match(/\d+/g) || [];
+    const ageMonths = nums.length ? Number(nums[0]) * 12 + (nums[1] ? Number(nums[1]) : 0) : null;
+    const p = { id: raw.id, name: raw.player_name, fp, asi, routine: 0, skills, ageMonths, age: ageMonths ? ageMonths / 12 : null };
+    return { verdict: youthPullVerdict(p), r5: playerR5(p), sum };
+  }
+
+  let youthReport = null, youthReportAt = 0;
   async function enhanceYouthDevelopmentPage() {
-    const rows = [...document.querySelectorAll('tr')]
-      .filter(tr => findPlayerLinkInRow(tr) && !tr.dataset.tmaYouthDone)
-      .slice(0, YOUTH_ROW_FETCH_CAP);
-    if (!rows.length) return;
-    const table = rows[0].closest('table');
-    if (table) {
-      const headerRow = [...table.querySelectorAll('tr')].find(r => r.querySelector('th'));
-      if (headerRow && !headerRow.querySelector('.tma-col-verdict')) {
-        appendHeaderCell(headerRow, 'Rou', 'tma-col-rou');
-        appendHeaderCell(headerRow, 'SI', 'tma-col-si');
-        appendHeaderCell(headerRow, 'R5', 'tma-col-r5');
-        appendHeaderCell(headerRow, 'Verdict', 'tma-col-verdict');
-      }
-      ensureScrollableTable(table);
+    const cards = [...document.querySelectorAll('div.youth_player[id^="youth_player_"]')].filter(c => c.dataset.tmaYouth !== 'graded');
+    if (!cards.length) return;
+    // Re-read the report at most every 2 s: a Reveal click mutates the cards and the next pass
+    // must see the newly revealed skills.
+    if (!youthReport || now() - youthReportAt > 2000) {
+      try { youthReport = JSON.parse(await tmPost('/ajax/youth.ajax.php', { type: 'get' })); youthReportAt = now(); }
+      catch (e) { console.warn('TM Advisor: youth report read failed', e); return; }
     }
-    // Claim every row and create its cells SYNCHRONOUSLY, before the first await. The
-    // MutationObserver that drives this re-fires on our own cell appends; if rows were only
-    // claimed as the async loop reached them, a re-entrant call would grab the not-yet-reached
-    // ones and append a second set of cells to them. Placeholder cells also mean a row whose
-    // fetch fails still has the right column count instead of shifting under the headings.
-    const pending = rows.map(tr => {
-      tr.dataset.tmaYouthDone = '1';
-      return { link: findPlayerLinkInRow(tr), cells: ['…', '…', '…', '…'].map(t => appendCell(tr, t)) };
+    const players = (youthReport && youthReport.players) || {};
+    cards.forEach(card => {
+      const id = card.id.replace('youth_player_', '');
+      const raw = Object.values(players).find(x => x && String(x.id) === id);
+      if (!raw) return;
+      let badge = card.querySelector('.tma-youth-verdict');
+      if (!badge) {
+        badge = document.createElement('div');
+        badge.className = 'tma-youth-verdict';
+        badge.style.cssText = 'margin:0 0 8px;padding:6px 10px;border-radius:8px;background:#1a1a1dcc;font:600 12px -apple-system,Segoe UI,Roboto,Arial,sans-serif;';
+        card.insertBefore(badge, card.firstChild);
+      }
+      const g = gradeYouthRecruit(raw);
+      if (g.hidden) { badge.textContent = 'TM Advisor: reveal skills to grade this recruit'; badge.style.color = '#9a9691'; return; }
+      const v = g.verdict;
+      badge.textContent = `${v ? v.verdict : '?'} · R5 ${g.r5 != null && !isNaN(g.r5) ? Number(g.r5).toFixed(1) : '-'} · ${g.sum} skill pts`;
+      badge.style.color = v ? v.cls : '#9a9691';
+      badge.title = v ? v.note : 'age not available — cannot grade';
+      card.dataset.tmaYouth = 'graded';
     });
-    for (const { link, cells } of pending) {
-      if (!link) { cells.forEach(td => { td.textContent = '-'; }); continue; }
-      try {
-        const p = normaliseTooltipPlayer(await fetchPlayerTooltip(link.id));
-        if (!p) { cells.forEach(td => { td.textContent = '-'; }); continue; }
-        ensureR5(p);
-        const v = youthPullVerdict(p);
-        cells[0].textContent = p.routine != null ? Number(p.routine).toFixed(1) : '-';
-        cells[1].textContent = p.asi != null ? Number(p.asi).toLocaleString() : '-';
-        cells[2].textContent = (p._r5 != null && !isNaN(p._r5)) ? Number(p._r5).toFixed(1) : '-';
-        cells[2].style.color = '#e0a95f'; cells[2].style.fontWeight = 'bold';
-        cells[3].textContent = v ? v.verdict : '?';
-        cells[3].style.color = v ? v.cls : '#8a939c'; cells[3].style.fontWeight = 'bold';
-        cells[3].title = v ? v.note : 'age not available - cannot grade the pull';
-      } catch (e) {
-        cells.forEach(td => { td.textContent = '-'; });
-        console.warn('TM Advisor: youth-development row failed', e);
-      }
-    }
   }
 
   // ---- Player detail page overlay (Rou / SI / R5 for ANY player, not just your squad) ----
@@ -1599,7 +1620,10 @@
       else if (path.startsWith('/finances')) setSlice('finances', parseFinances(document));
       else if (path.startsWith('/club/') && path.includes('/squad/')) {
         const id = path.split('/')[2];
-        if (id && id === clubId) { /* own squad overview page - not the players editor, skip */ }
+        if (id && id === clubId) {
+          fetchOpponentSquadReal(id).then(players => { if (players.length) injectColumnsWhenReady(players, { showRou: true, showSI: true, showTrend: true }); })
+            .catch(e => console.warn('TM Advisor: own squad columns', e));
+        }
         else {
           const scraped = parseSquadPage(document);
           const oppName = scraped.name || null;
@@ -1618,7 +1642,7 @@
             injectColumnsWhenReady(fallback, { showRou: true, showSI: true });
           });
         }
-      } else if (path.startsWith('/club/') && path.split('/').filter(Boolean).length === 2) {
+      } else if (path === '/club/' || path === '/club' || (path.startsWith('/club/') && path.split('/').filter(Boolean).length === 2)) { // own club page is bare /club/
         setSlice('club', parseClub(document));
       } else if (/^\/players\/\d+\//.test(path)) {
         // An individual player's profile page (e.g. /players/142683102/Mario-Maimela/) —
@@ -3387,6 +3411,9 @@
   .tma-icon-btn:active { transform:scale(.9); }
   .tma-chevron { display:inline-block; transition:transform .2s var(--tma-ease); }
   #tma-panel.tma-collapsed .tma-chevron { transform:rotate(-90deg); }
+  .tma-status { font-size:10.5px; font-weight:600; padding:2px 8px; border-radius:20px; margin-left:6px; white-space:nowrap; letter-spacing:0; }
+  .tma-status.ok { background:#6fae7c26; color:var(--tma-lime); }
+  .tma-status.warn { background:#e0a95f26; color:var(--tma-amber); }
   .tma-sub { font-size:11px; color:var(--tma-mute); margin-top:2px; padding-bottom:10px; display:flex; align-items:center; gap:6px; }
   .tma-ctx-dot { width:6px; height:6px; border-radius:50%; background:var(--tma-lime); box-shadow:0 0 0 0 #6fae7c66;
     animation:tma-pulse 2s infinite; display:inline-block; flex-shrink:0; }
@@ -3550,7 +3577,7 @@
     panel.innerHTML = `
       <div class="tma-head" id="tma-drag-handle">
         <div class="tma-head-row">
-          <div class="tma-title">TM Advisor</div>
+          <div class="tma-title">TM Advisor <span id="tma-status-slot">${matchStatusHtml()}</span></div>
           <div class="tma-head-actions">
             <span class="tma-icon-btn" id="tma-collapse-toggle" title="Collapse / expand"><span class="tma-chevron">▾</span></span>
           </div>
@@ -3583,6 +3610,37 @@
       setCollapsed(!panel.classList.contains('tma-collapsed'));
     });
     if (!panel.classList.contains('tma-collapsed')) openTab(contextTabForPath());
+    setInterval(refreshMatchStatus, 60e3); // keeps the kickoff countdown honest
+  }
+
+  // Match-day status for the header — visible even with the dock collapsed: who's next, when,
+  // and whether a plan was applied for THAT match (Apply/autopilot record a prediction per id).
+  function nextMatchInfo() {
+    const nm = getSlice('home') && getSlice('home').data && getSlice('home').data.nextMatch;
+    if (!nm || !nm.home || !nm.away) return null;
+    const opp = String(nm.home.id) === clubId ? nm.away : nm.home;
+    const matchId = nm.matchUrl ? (nm.matchUrl.match(/\/matches\/(\d+)/) || [])[1] : null;
+    const preds = (getSlice('predictions') || { data: {} }).data || {};
+    return { opp, matchId, kickoff: parseKickoff(nm.when), home: opp === nm.away, applied: !!(matchId && preds[matchId]), prediction: matchId ? preds[matchId] : null };
+  }
+  function kickoffText(ko) {
+    if (!ko) return '';
+    const mins = Math.round((ko - now()) / 60e3);
+    if (mins < 0) return 'kicked off';
+    if (mins < 60) return `in ${mins}m`;
+    if (mins < 24 * 60) return `in ${Math.floor(mins / 60)}h ${mins % 60}m`;
+    return new Date(ko).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }) + ' ' + new Date(ko).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  }
+  function matchStatusHtml() {
+    const m = nextMatchInfo();
+    if (!m) return '';
+    const name = m.opp.name && m.opp.name.length > 18 ? m.opp.name.slice(0, 17) + '…' : (m.opp.name || '?');
+    const when = kickoffText(m.kickoff);
+    return `<span class="tma-status ${m.applied ? 'ok' : 'warn'}" title="${m.applied ? 'A plan was applied for this match' : 'No plan applied for this match yet — open Tactics'}">v ${esc(name)}${when ? ' · ' + when : ''} · ${m.applied ? '✔ tactic set' : '⚠ tactic not set'}</span>`;
+  }
+  function refreshMatchStatus() {
+    const slot = document.getElementById('tma-status-slot');
+    if (slot) slot.innerHTML = matchStatusHtml();
   }
 
   // Human-readable label per advisor tab, used to render the single relevant tab for
@@ -3620,7 +3678,11 @@
     if (/^\/players\/\d+/.test(p)) return 'Player profile';
     if (p.startsWith('/players')) return 'Your players';
     if (p.startsWith('/tactics')) return 'Tactics page';
-    if (p.startsWith('/club/') && p.includes('/squad')) return 'Opponent squad';
+    if (p.startsWith('/club/') && p.includes('/squad')) return p.includes('/' + clubId + '/') ? 'Your squad' : 'Opponent squad';
+    if (p.startsWith('/fixtures')) return 'Fixtures';
+    if (p.startsWith('/statistics')) return 'Statistics';
+    if (p.startsWith('/history')) return 'Club history';
+    if (p.startsWith('/sponsors')) return 'Sponsors';
     if (p === '/home/' || p === '/home') return 'Home';
     return 'Club intelligence';
   }
@@ -3630,7 +3692,7 @@
     const p = location.pathname;
     if (p.startsWith('/matches/')) return 'dash';           // last-match stats live on the dashboard
     if (p.startsWith('/stadium')) return 'stadium';
-    if (p.startsWith('/finances')) return 'stadium';         // finances feed the stadium ROI view
+    if (p.startsWith('/finances') || p.startsWith('/sponsors')) return 'stadium'; // money pages feed the stadium ROI view
     if (p.startsWith('/transfer') || p.startsWith('/shortlist') || p.startsWith('/scouts')) return 'scouting';
     if (p.startsWith('/league')) return 'league';
     // An individual player's profile page (e.g. /players/142683102/...) isn't your squad —
@@ -3644,6 +3706,7 @@
   }
 
   function renderTab(tab) {
+    refreshMatchStatus();
     if (tab === 'dash') renderDashboard();
     else if (tab === 'tactics') renderTactics();
     else if (tab === 'stadium') renderStadiumTab();
@@ -3662,7 +3725,13 @@
       }).join('');
 
     const nm = c.home && c.home.data && c.home.data.nextMatch;
-    const nmHtml = nm ? `<div class="tma-mini">${esc(nm.home.name)} vs ${esc(nm.away.name)}<br>${esc(nm.when || '')}</div>` : `<div class="tma-mini">No data yet.</div>`;
+    const nmi = nextMatchInfo();
+    const nmHtml = nm ? `
+      <div class="tma-row" style="font-weight:700;"><span>${esc(nm.home.name)}</span><span class="tma-mini">vs</span><span>${esc(nm.away.name)}</span></div>
+      <div class="tma-row"><span class="tma-mini">${esc(nm.when || '')}</span><span class="tma-mini">${nmi ? kickoffText(nmi.kickoff) : ''}</span></div>
+      ${nmi && nmi.prediction ? `<div class="tma-row"><span>Expected (model)</span><span class="tma-goodval">${nmi.prediction.gd >= 0 ? '+' : ''}${nmi.prediction.gd.toFixed(1)} goals</span></div>` : ''}
+      <div class="tma-row"><span>Tactic</span><span style="color:${nmi && nmi.applied ? 'var(--tma-lime)' : 'var(--tma-amber)'};font-weight:700;">${nmi && nmi.applied ? '✔ applied for this match' : '⚠ not applied yet'}</span></div>
+      <a class="tma-btn" href="/tactics/" style="display:block;text-align:center;text-decoration:none;">Review &amp; apply on Tactics →</a>` : `<div class="tma-mini">No data yet.</div>`;
 
     const lastResult = c.lastMatchResult;
     const lastResultHtml = lastResult ? (() => {

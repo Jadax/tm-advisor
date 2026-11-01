@@ -119,14 +119,16 @@ The floating panel shows **one tab at a time** — whichever matches the page yo
 
 | Page | Tab |
 |------|-----|
-| Home | Dashboard |
-| Tactics / Players | Tactics (incl. training priorities) |
-| Transfer / Scouts / Youth Dev | Scouting |
-| Stadium / Finances | Stadium |
+| Home / Fixtures / Statistics / History | Dashboard |
+| Tactics | Tactics — Apply, the match plan, results evidence, training priorities |
+| Transfer / Scouts | Scouting |
+| Stadium / Finances / Maintenance / Wages / Sponsors | Stadium |
 | League | League squad strength |
 | Match pages | Dashboard (with match stats) |
 
-The dock hides itself on `/players/`, `/club/`, and `/youth-development/` pages, where the inline columns and Keep/Release verdicts do the work instead.
+**Match-day status, always visible** — even collapsed, the dock's header reads e.g. *"v Mashau · in 5h 12m · ✔ tactic set"*, turning amber (*"⚠ tactic not set"*) when no plan has been applied for the next match.
+
+The dock hides itself on `/players/`, `/club/` and `/youth-development/`, where the game page itself is enhanced instead: Rou/SI/R5 columns on your Players page and on every squad overview (yours included), a stat card on player profiles, and a **STAR / KEEP / MAYBE / RELEASE** badge on each youth-report recruit once its skills are revealed.
 
 **Dragging** — drag by the header to reposition. The panel remembers where you left it.
 

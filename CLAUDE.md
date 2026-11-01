@@ -23,6 +23,7 @@ Single-file Tampermonkey userscript (`TM_Advisor.js`) for trophymanager.com. One
 - `/ajax/tooltip.ajax.php` — per-player skills/SI/routine/wage (precise age incl. months)
 - `players_get_select` field traps: name is `player_name` (no `name`); stars are `rec_count` — `rec` is an unrelated raw ≈14 figure. Match-report line-ups (`match.ajax.php`) carry `rec` in stars + `routine` + `position` (slot) per player, also pre-match for the next fixture.
 - `/ajax/fixtures.ajax.php` POST `type=club&var1=<clubId>` (or `type=league&var1=<country>&var2=<div>&var3=<group>`) — `{ "YYYY-MM": { matches: [{id, date, hometeam, awayteam, result, matchtype}] } }`; unplayed = no `result`
+- `/ajax/youth.ajax.php` POST `{type:'get'}` (the page's own load call, read-only) → `{players: {id: {player_name, favposition 'dc'|'gk'…, age, wage, fee, strength…/handling…/aerial/oneonones}}, cash, squad_size}`; skills are hidden until revealed; NO SI. Cards render as `div.youth_player#youth_player_<id>` (not table rows). Reports arrive weekly (Saturday).
 - Page globals: `players_ar` (/players/), `test_lineup` (/matches/), facility JS on /stadium/
 
 ## Tactics page (`/tactics/`, `js/tactics_v2.js` — read + written live 2026-11-01)
