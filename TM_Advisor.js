@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.15.0
+// @version      3.15.1
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -2049,7 +2049,9 @@
     const lineup = keys.map((k, i) => {
       const p = players[pick[i]], v = p ? score[i][pick[i]] : NO_FIT;
       const ok = p && v > NO_FIT / 2;
-      return { slot: k, bucket: slotBucket(k), side: slotSide(k), player: ok ? p : null, effectiveR5: ok ? v : 0, penalty: ok ? tmPositionPenalty(p.fp, SLOT_NUM[k]) : 0 };
+      // A boost only decides who plays; strengths (and so mentality) use the real rating — seen
+      // live: the reserves' 1.5x youth boost made them look far stronger and picked Attacking.
+      return { slot: k, bucket: slotBucket(k), side: slotSide(k), player: ok ? p : null, effectiveR5: ok ? (boost ? slotRating(p, k) : v) : 0, penalty: ok ? tmPositionPenalty(p.fp, SLOT_NUM[k]) : 0 };
     });
     return { lineup, totalRec: lineup.reduce((s, l) => s + l.effectiveR5, 0), formation: formationKey };
   }
@@ -3006,7 +3008,15 @@
     POSITION_KEYS.forEach(k => { const old = current.onField[k]; if (old !== '0' && !placed.has(old)) moves[old] = 'out'; });
     // One post carries XI + bench + roles: the server takes the roles from `on_field`.
     await tmPost('/ajax/tactics_post.ajax.php', { on_field: state.onField, players: moves, ...tmBase(res) });
-    if (state.mentality == null) return; // positions-only save (reserve line-up)
+    // Roles go one per request, as TM's own page drops them — the reserves ignored roles sent
+    // only inside on_field (live: captain/corner/penalty/freekick all stayed 0).
+    for (const role of ['captain', 'corner', 'penalty', 'freekick']) {
+      const pid = state.onField[role];
+      if (!pid || pid === '0') continue;
+      await sleep(150);
+      await tmPost('/ajax/tactics_post.ajax.php', { on_field: state.onField, players: { [pid]: role }, ...tmBase(res) });
+    }
+    if (state.mentality == null) return; // positions-only save
     for (const [save, value] of [['mentality', state.mentality], ['attacking', state.style], ['focus', state.focus]]) {
       await sleep(150);
       await tmPost('/ajax/tactics_post.ajax.php', { save, value, club_id: SESSION.id, ...tmBase(res) });
