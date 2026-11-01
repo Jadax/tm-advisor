@@ -52,8 +52,8 @@ Adds **Routine**, **Skill Index**, and **R5** columns directly to the game's own
 
 ### 🔍 Scouting & Transfers
 
-- **Youth Finder** — scans players you've seen on the transfer list and ranks them by a composite score (R5, SI, routine, age upside). Shows Elite / Strong tiers with sell prices and budget guidance.
-- **Senior Targets** — same pool, but filters for players who'd be a genuine upgrade over your weakest starter in their position.
+- **Youth Finder** — ranks youngsters you've seen on the transfer list by **development pace**: skill points gained per year since 16, read from their SI with the same formula the R5 engine uses — boosted when a scout report shows growth headroom. Flags any who'd already start for you.
+- **Senior Targets** — every candidate is judged by what he does to **your best XI**: the script re-picks your optimal XI with him added and shows the gain, the slot he'd take and who he'd replace — so position, your depth there and TM's out-of-position penalty all count.
 - **Market-value verdict** — for every shortlisted player, compares the live bid against the game's Sell-to-Agent / Max Sell Price to flag it **Underpriced / Fair / Overpriced** at a glance.
 - **Bloom-phase estimate** — grades each scout report's youth by bloom phase (from age + potential headroom) so you know who to train hard before it ends.
 - **Spending Guidance** — calculates a recommended transfer budget based on your cash, wage bill, and a 12-week reserve buffer.

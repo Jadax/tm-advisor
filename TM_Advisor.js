@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.11.1
+// @version      3.12.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -2358,27 +2358,33 @@
     return asi > 0 ? 15 * Math.log10(1 + asi) : 0;
   }
 
+  // Skill points implied by SI — the exact inverse of the ASI relation the R5 remainder uses
+  // (Section 2B: skillSum = (weight·ASI)^(1/7)). SI 30 ≈ 70 points outfield (avg 5 a skill).
+  function skillSumFromSI(asi, isGK) {
+    const w = isGK ? 48717927500 : 263533760000;
+    return asi > 0 ? Math.pow(w * asi, 1 / 7) : null;
+  }
+  // Development pace: skill points gained per year since the 16y0m pull, measured from the
+  // SI-30 pull baseline (YOUTH_CRITERIA.minASI). A fact about the player so far, not a
+  // projection — nothing here guesses how fast he'll grow next.
+  function youthPace(p) {
+    const isGK = bucketFor(p.fp) === 'GK';
+    const sum = skillSumFromSI(Number(p.asi) || 0, isGK), ageMonths = ageMonthsOf(p);
+    if (sum == null || !ageMonths) return null;
+    const years = Math.max(0.25, (ageMonths - 192) / 12);
+    return { sum, pace: (sum - skillSumFromSI(YOUTH_CRITERIA.minASI, isGK)) / years };
+  }
+
+  // Youth ranking: development pace, scaled by the scout's growth headroom when a report
+  // exists (potential/rec, capped 2×), less a soft cost term. Own heuristic combination.
   function scoutScore(p, opts) {
     opts = opts || {};
-    const r5 = effectiveR5(p);
-    const age = p.age != null ? Number(p.age) : 25;
-    const routine = Number(p.routine) || 0;
-    const asi = Number(p.asi) || 0;
-    let score = r5 + Math.log10(1 + asi) * 2 + Math.min(routine, 20) * 0.1;
-    if (opts.youth) {
-      score += Math.max(0, 18 - age) * 1.5;
-      // Scout-report growth headroom (potential/rec, Section 3) is the single best signal
-      // of how much value we still get to buy, so it earns real weight: every 0.25x above
-      // rec adds ~3 points (heuristic, understood to over-reward 2x+ reports - and that is
-      // deliberate, those are exactly the gems worth ranking first). growth can arrive as
-      // opts.growth (from rankYouth, which merges scout report + player fields).
-      const g = opts.growth != null ? Number(opts.growth) : (p.growthMultiple != null ? Number(p.growthMultiple) : null);
-      if (g != null && g > 1) score += Math.min((g - 1), 1.5) * 12;
-    }
+    const pace = youthPace(p);
+    let score = pace ? pace.pace : effectiveR5(p) / 4;
+    const g = opts.growth != null ? Number(opts.growth) : (p.growthMultiple != null ? Number(p.growthMultiple) : null);
+    if (g != null && g > 1) score *= Math.min(g, 2);
     const cost = p._cost != null ? p._cost : (p._price || estimateBankPrice(p) || 0);
-    if (cost > 0) score -= Math.log10(1 + cost / 1e6) * (opts.youth ? 1 : 2);
-    const wage = Number(p.wage) || 0;
-    if (!opts.youth && wage > 0) score -= Math.log10(1 + wage / 1e4) * 0.5; // ongoing cost, senior signings only
+    if (cost > 0) score -= Math.log10(1 + cost / 1e6) * 2;
     return score;
   }
 
@@ -2544,6 +2550,8 @@
       routine: p.routine != null ? Number(Number(p.routine).toFixed(1)) : null,
       potential: p._potential != null ? p._potential : null,
       growth: p._growth != null ? Number(Number(p._growth).toFixed(2)) : null,
+      pace: youthPace(p) ? Number(youthPace(p).pace.toFixed(1)) : null,
+      xiGain: p._xi && p._xi.gain >= SENIOR_CRITERIA.minXiGain ? Number(p._xi.gain.toFixed(1)) : null, xiSlot: p._xi ? p._xi.slot : null,
       price: p._price || null, estValue: p._estValue || null, maxValue: p._maxValue || null,
       tier: p._tier, topTalent: !!p._topTalent, highPotential: !!p._highPotential,
       src: p._src || null, addedAt: now(),
@@ -2558,7 +2566,10 @@
     const scout = getSlice('scoutReports');
     const scoutById = {};
     if (scout && scout.data) scout.data.forEach(r => { if (r.id) scoutById[String(r.id)] = r; });
-    const ranked = rankYouth(filterYouth(pool, YOUTH_CRITERIA), scoutById, YOUTH_CRITERIA, prefs || loadShortlistPrefs('youth'));
+    const youth = filterYouth(pool, YOUTH_CRITERIA);
+    const ctx = ownSquadForImpact();
+    if (ctx) youth.forEach(c => { if (c._r5 != null && !isNaN(c._r5) && c.skills && Object.keys(c.skills).length >= 11) c._xi = xiImpact(c, ctx); });
+    const ranked = rankYouth(youth, scoutById, YOUTH_CRITERIA, prefs || loadShortlistPrefs('youth'));
     saveYouthShortlist(ranked);
     return { ranked, poolSize: pool.length };
   }
@@ -2593,7 +2604,29 @@
     minEdgePct: 5,       // must beat your weakest same-bucket starter's R5 by at least this %
     minEdgePctSI: 15,     // SI-only fallback needs a bigger edge — it's a cruder signal than R5
     minR5Fallback: 20,   // used only when we don't have a same-bucket starter to compare against
+    // XI-impact gates (own heuristics, in summed slot-R5 points of your best XI):
+    minXiGain: 1,        // he must make your best XI better at all
+    eliteXiGain: 5,      // a clear upgrade on whoever he replaces
   };
+
+  // What a signing does to YOUR best XI: rerun the optimal XI (Section 5) with him added.
+  // One number covers his position, your current depth there and TM's position penalty —
+  // a D/DM L who'd be your best left-back is judged as one, not as a DM.
+  function ownSquadForImpact() {
+    const sl = getSlice('players');
+    if (!sl || !sl.data || !sl.data.length) return null;
+    const squad = sl.data.map(p => ({ ...p }));
+    return { squad, base: bestFormation(squad) };
+  }
+  function xiImpact(candidate, ctx) {
+    const c = { ...candidate, id: 'cand-' + candidate.id };
+    const withHim = bestFormation(ctx.squad.concat([c]));
+    const spot = withHim.lineup.find(l => l.player === c);
+    if (!spot) return { gain: 0, slot: null, replaces: null };
+    const ids = new Set(withHim.lineup.filter(l => l.player).map(l => String(l.player.id)));
+    const out = ctx.base.lineup.find(l => l.player && !ids.has(String(l.player.id)));
+    return { gain: withHim.totalRec - ctx.base.totalRec, slot: spot.slot, replaces: out ? out.player.name : null };
+  }
 
   // Weakest starting R5 per position bucket (GK/D/DM/M/OM/F) in your OWN best XI right now —
   // the bar a transfer target has to clear. Reuses the exact same formation/penalty engine
@@ -2649,6 +2682,7 @@
       const siKnown = p.asi != null && !isNaN(Number(p.asi)) && Number(p.asi) > 0;
       if (!r5Known && !siKnown) return false;
       if (r5Known) {
+        if (p._xi) return p._xi.gain >= c.minXiGain;
         const baseline = weakestMap && weakestMap[bucket] != null ? weakestMap[bucket] : null;
         const threshold = baseline != null ? baseline * (1 + c.minEdgePct / 100) : c.minR5Fallback;
         if (p._r5 >= threshold) return true;
@@ -2679,9 +2713,11 @@
       return { ...p, _price: bidPrice, _estValue: estValue, _maxValue: maxValue, _cost: bidPrice != null ? bidPrice : estValue };
     });
     const filtered = applyUserPrefs(withCost, prefs);
-    const scored = filtered.map(p => ({ ...p, _score: scoutScore(p, { youth: false }) }));
-    scored.sort((a, b) => b._score - a._score);
-    return tierAndFilter(scored);
+    // Known XI impact first, biggest gain first; SI-only candidates (skills not seen yet) after,
+    // by SI. Tiers are the gain itself (SENIOR_CRITERIA), not a share of the list.
+    const gainOf = p => p._xi ? p._xi.gain : -Infinity;
+    return filtered.sort((a, b) => (gainOf(b) - gainOf(a)) || ((Number(b.asi) || 0) - (Number(a.asi) || 0)))
+      .map(p => ({ ...p, _tier: p._xi ? (p._xi.gain >= SENIOR_CRITERIA.eliteXiGain ? 'elite' : 'strong') : 'skills' }));
   }
 
   function saveSeniorShortlist(rankedList) {
@@ -2694,6 +2730,7 @@
       routine: p.routine != null ? Number(Number(p.routine).toFixed(1)) : null,
       price: p._price || null, estValue: p._estValue || null, maxValue: p._maxValue || null, wage: p.wage || null,
       tier: p._tier, nat: p.nat || null,
+      xiGain: p._xi ? Number(p._xi.gain.toFixed(1)) : null, xiSlot: p._xi ? p._xi.slot : null, replaces: p._xi ? p._xi.replaces : null,
       src: p._src || null, addedAt: now(),
     }));
     setSlice('seniorShortlist', compact);
@@ -2706,6 +2743,8 @@
     const weakestMap = ownWeakestByBucket();
     const weakestSIMap = ownWeakestSIByBucket();
     const criteria = { ...SENIOR_CRITERIA, maxAge: p.maxAge != null ? p.maxAge : SENIOR_CRITERIA.maxAgeDefault };
+    const ctx = ownSquadForImpact();
+    if (ctx) pool.forEach(c => { if (c._r5 != null && !isNaN(c._r5) && c.skills && Object.keys(c.skills).length >= 11) c._xi = xiImpact(c, ctx); });
     const ranked = rankSenior(filterSenior(pool, weakestMap, weakestSIMap, criteria), p);
     saveSeniorShortlist(ranked);
     return { ranked, poolSize: pool.length, weakestMap, maxAge: criteria.maxAge };
@@ -4107,7 +4146,9 @@
         <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${esc(p.name)} ↗</a>${badge(p)}${natBadge(p)}</h4>
         <div class="tma-row"><span>Age</span><span class="tma-goodval">${p.age != null ? p.age : '?'}</span></div>
         <div class="tma-row"><span>Position</span><span>${esc(p.fp || '?')}</span></div>
-        <div class="tma-row"><span>R5</span><span class="tma-goodval">${p.r5 != null ? p.r5.toFixed(1) : '—'}</span></div>
+        <div class="tma-row"><span>Development pace</span><span class="tma-goodval">${p.pace != null ? '+' + p.pace.toFixed(0) + ' skill pts / year' : '—'}</span></div>
+        ${p.xiGain != null ? `<div class="tma-row"><span>Your best XI now</span><span class="tma-goodval">+${p.xiGain.toFixed(1)} <span class="tma-mini">— would start at ${esc(String(p.xiSlot || '').toUpperCase())}</span></span></div>` : ''}
+        <div class="tma-row"><span>R5</span><span>${p.r5 != null ? p.r5.toFixed(1) : '—'}</span></div>
         <div class="tma-row"><span>SI</span><span>${p.asi != null ? p.asi.toLocaleString() : '—'}</span></div>
         <div class="tma-row"><span>Routine</span><span>${p.routine != null ? p.routine.toFixed(1) : '—'}</span></div>
         ${costRow(p)}
@@ -4125,7 +4166,10 @@
         <h4><a href="${playerLink(p)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${esc(p.name)} ↗</a>${tierBadge(p)}${natBadge(p)}</h4>
         <div class="tma-row"><span>Age</span><span>${p.age != null ? p.age : '?'}</span></div>
         <div class="tma-row"><span>Position</span><span>${esc(p.fp || '?')}</span></div>
-        <div class="tma-row"><span>R5</span><span class="tma-goodval">${p.r5Known ? p.r5.toFixed(1) : '—'}${p.baseline != null ? ` <span class="tma-mini">(weakest ${bucketFor(p.fp)}: ${p.baseline.toFixed(1)})</span>` : ''}</span></div>
+        ${p.xiGain != null
+          ? `<div class="tma-row"><span>Your best XI</span><span class="tma-goodval">+${p.xiGain.toFixed(1)} <span class="tma-mini">— starts at ${esc(String(p.xiSlot || '').toUpperCase())}${p.replaces ? ', replaces ' + esc(p.replaces) : ''}</span></span></div>`
+          : `<div class="tma-row"><span>Your best XI</span><span class="tma-mini">open his Skills view on the transfer list to measure — his SI already beats your weakest starter there</span></div>`}
+        <div class="tma-row"><span>R5</span><span>${p.r5Known ? p.r5.toFixed(1) : '—'}</span></div>
         <div class="tma-row"><span>SI</span><span>${p.asi != null ? p.asi.toLocaleString() : '—'}</span></div>
         <div class="tma-row"><span>Routine</span><span>${p.routine != null ? p.routine.toFixed(1) : '—'}</span></div>
         ${p.wage ? `<div class="tma-row"><span>Wage</span><span>${fmtMoney(p.wage)}/wk</span></div>` : ''}

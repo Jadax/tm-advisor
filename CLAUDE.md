@@ -6,7 +6,7 @@ Single-file Tampermonkey userscript (`TM_Advisor.js`) for trophymanager.com. One
 
 ## Rules
 
-- Reuse before adding: grep for an existing helper first (`ensureR5`, `bucketFor`, `sideFor`, `parseMoney`, `fmtMoney`, `bindBtn`, `esc`, `badge`, `costRow`, `playerLink`, `ago`, `fetchDoc`, `fetchMatchJson`). One helper per concept.
+- Reuse before adding: grep for an existing helper first (`ensureR5`, `slotRating`, `bestFormation`, `buildMatchPlan`, `xiImpact`, `youthPace`, `bucketFor`, `sideFor`, `parseMoney`, `fmtMoney`, `bindBtn`, `esc`, `badge`, `costRow`, `playerLink`, `ago`, `fetchDoc`, `fetchMatchJson`, `tmPost`, `sleep`). One helper per concept.
 - Game formulas (R5, Sell-to-Agent, Max Sell Price, training/growth) must trace to a cited source — official wiki page or named community script, in a one-line comment. Never invent numbers. Heuristics must be labelled as heuristics in both comments and UI copy.
 - Escape every game-supplied string with `esc()` before it enters an innerHTML template — club/player names are attacker-controlled.
 - Comments only for non-obvious WHY (game quirks, confirmed-surprising formulas, past bugs prevented). No restating code.
