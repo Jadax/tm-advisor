@@ -40,7 +40,9 @@ One **Prepare match** button on the Dashboard does everything the next match nee
 | Scouting | Sends free scouts to your youths first; flags any scout with 20s in the key stats on the hire list (never hires) |
 | Facilities *(off until you enable it — spends cash)* | Training ground / youth academy first, else an income facility that pays back within 26 weeks; never one already building, one per run, never into your wage reserve |
 
-Switch on **autopilot** and the same run happens by itself once per match, whenever you open a TM page — never inside the tactics lock. A dry run shows exactly what it would change.
+**Autopilot is on by default** (switch it off on the Dashboard): whenever a TM page is open in your browser it prepares both teams for every fixture, runs training once per training week, handles each weekly youth report, scouts daily — never inside a match's tactics lock. It can only run while TM is open in a browser with the script installed, so open TM at least once before each match locks. A dry run shows exactly what it would change.
+
+No slot is ever left empty (an empty slot can forfeit a match): if a position has no natural player, the best available player with the smallest out-of-position penalty takes it — even an outfielder in goal as a last resort. Conditional orders are timed to the matchup: as the underdog the team holds a lead early and chases late, as the favourite it chases early and protects late.
 
 ### 🧠 Tactics Engine
 
