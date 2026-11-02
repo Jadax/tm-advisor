@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.18.0
+// @version      3.19.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -986,6 +986,7 @@
     const matchIds = await fetchOpponentRecentMatchIds(oppClubId, 5);
     const mentalities = [], styles = [], focuses = [];
     const appearances = {}; // playerId -> times featured
+    const chase = [], hold = [], subs = [];
     let fetched = 0;
     for (const id of matchIds) {
       try {
@@ -1001,6 +1002,8 @@
         if (data.match_data.focus_side) focuses.push(String(data.match_data.focus_side[side]));
         const lineup = data.lineup && data.lineup[side];
         if (lineup) Object.keys(lineup).forEach(pid => { appearances[pid] = (appearances[pid] || 0) + 1; });
+        const b = opponentInGame(data, String(oppClubId), lineup);
+        chase.push(...b.chase); hold.push(...b.hold); subs.push(...b.subs);
         fetched++;
       } catch (e) { console.warn('TM Advisor: opponent match fetch failed for', id, e); }
     }
@@ -1023,7 +1026,35 @@
       // Formation observed across their actual last-N line-ups (proof-backed, not a guess):
       // the count of position buckets among their most-used players over the sampled games.
       likelyXI, recentFormation: fetched ? (defLine + '-' + midLine + '-' + fwdLine) : null,
+      inGame: { games: fetched, chase: inGameSummary(chase), hold: inGameSummary(hold), subs: inGameSummary(subs) },
     };
+  }
+  // What a side did DURING its matches — mentality changes (with the score at that moment) and
+  // subs — i.e. its conditional orders as they fired. Report shape: report[minute][] events with
+  // parameters [{goal:{player}}, {mentality_change:{team, mentality}}, {sub:{player_in, player_out}}]
+  // (as read by the community "TM Match Viewer" script).
+  function opponentInGame(data, teamId, lineup) {
+    const out = { chase: [], hold: [], subs: [] };
+    const md = data.match_data || {}, rpt = data.report || {};
+    const isHome = String(data.club.home.id) === teamId;
+    const ours = new Set(Object.keys(lineup || {}));
+    let ment = Number(md.mentality && md.mentality[isHome ? 'home' : 'away']) || 4, gf = 0, ga = 0;
+    Object.keys(rpt).map(Number).sort((a, b) => a - b).forEach(min => (rpt[min] || []).forEach(evt => (evt && evt.parameters || []).forEach(pr => {
+      if (pr.goal) { if (ours.has(String(pr.goal.player))) gf++; else ga++; }
+      if (pr.mentality_change && String(pr.mentality_change.team) === teamId) {
+        const to = Number(pr.mentality_change.mentality);
+        if (to > ment && gf < ga) out.chase.push({ min, to });
+        if (to < ment && gf > ga) out.hold.push({ min, to });
+        ment = to;
+      }
+      if (pr.sub && (ours.has(String(pr.sub.player_out)) || ours.has(String(pr.sub.player_in)))) out.subs.push({ min });
+    })));
+    return out;
+  }
+  function inGameSummary(list) {
+    if (!list.length) return null;
+    const mins = list.map(x => x.min).sort((a, b) => a - b);
+    return { n: list.length, min: mins[Math.floor(mins.length / 2)] };
   }
 
   // ---- Next-match EXPECTED line-up (proof-backed, from the actual next-match page) ----
@@ -1350,19 +1381,38 @@
         // A table can have more than one header row (e.g. the squad page has a separate
         // "Goalkeepers" sub-header) — decorate every row that has <th> cells.
         [...table.querySelectorAll('tr')].filter(r => r.querySelector('th')).forEach(addHeaderCells);
-        ensureScrollableTable(table);
+        if (!opts.compact) ensureScrollableTable(table);
       }
 
       const p = byId[String(link.id)];
       const trend = (showTrend && p) ? playerTrend(p.id) : null;
-      const mkCell = (text, gold, chipHtml) => appendCell(tr, text, { color: gold ? '#7fb2e0' : null, chipHtml });
+      const mkCell = (text, gold, chipHtml) => { const td = appendCell(tr, text, { color: gold ? '#7fb2e0' : null, chipHtml }); td.dataset.tmaC = '1'; return td; };
       if (showRou) mkCell((p && p.routine != null) ? Number(p.routine).toFixed(1) : '-', false, trend ? trendChip(trend.routine) : '');
       if (showSI) mkCell((p && p.asi != null) ? Number(p.asi).toLocaleString() : '-', false, trend ? trendChip(trend.asi) : '');
       mkCell((p && p._r5 != null && !isNaN(p._r5)) ? Number(p._r5).toFixed(1) : '-', true, trend ? trendChip(trend.r5) : '');
       tr.dataset.tmaCols = '1';
       decorated++;
     });
+    if (opts.compact) fitTables();
     return decorated;
+  }
+  // The squad page has no room to its right, so instead of a scrollbar our cells are narrow and
+  // the name column gives up exactly the overflow (names end in "…", full name on hover).
+  function fitTables() {
+    document.querySelectorAll('th.tma-col-r5').forEach(th => {
+      const table = th.closest('table');
+      if (!table) return;
+      table.querySelectorAll('.tma-col-rou, .tma-col-si, .tma-col-r5, td[data-tma-c]').forEach(c => { c.style.padding = '0 3px'; c.style.fontSize = '11px'; c.style.whiteSpace = 'nowrap'; });
+      const box = table.parentElement;
+      const over = box ? table.offsetWidth - box.clientWidth : 0;
+      if (over <= 0) return;
+      const links = [...table.querySelectorAll('a[player_link], a[href*="/players/"]')];
+      const w = Math.max(...links.map(a => a.offsetWidth), 0);
+      links.forEach(a => {
+        a.title = a.title || a.textContent.trim();
+        Object.assign(a.style, { display: 'inline-block', maxWidth: Math.max(70, w - over - 4) + 'px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'bottom' });
+      });
+    });
   }
 
   // Robust wrapper for JS-rendered / re-sortable tables (the OWN /players/ page is built
@@ -1656,7 +1706,9 @@
       else if (path.startsWith('/club/') && path.includes('/squad/')) {
         const id = path.split('/')[2];
         if (id && id === clubId) {
-          fetchOpponentSquadReal(id).then(players => { if (players.length) injectColumnsWhenReady(players, { showRou: true, showSI: true, showTrend: true }); })
+          // The squad page lists the reserves (B) as well; they come from the B team's own id.
+          const b = window.SESSION && SESSION.b_team ? fetchOpponentSquadReal(String(SESSION.b_team)).catch(() => []) : Promise.resolve([]);
+          Promise.all([fetchOpponentSquadReal(id), b]).then(([a, bb]) => { const players = a.concat(bb); if (players.length) injectColumnsWhenReady(players, { showRou: true, showSI: true, showTrend: true, compact: true }); })
             .catch(e => console.warn('TM Advisor: own squad columns', e));
         }
         else {
@@ -2299,14 +2351,20 @@
     even: { chase1: [70, 2], chase2: 75, hold1: 75, hold2: 70, red: 2 },
     favourite: { chase1: [60, 2], chase2: 65, hold1: 80, hold2: 75, red: 1 },
   };
-  function matchContext(settings, expected) {
+  function matchContext(settings, expected, scouting) {
     const d = settings && settings.difficulty && settings.difficulty.label;
     const context = settings && settings.predictedGD != null ? contextOf(settings.predictedGD)
       : /Tough|harder/.test(d || '') ? 'underdog' : /Comfortable|favoured/.test(d || '') ? 'favourite' : 'even';
-    return { context, oppMent: expected && expected.mentality ? Number(expected.mentality) : null };
+    const ig = scouting && scouting.inGame;
+    return { context, oppMent: expected && expected.mentality ? Number(expected.mentality) : null,
+      oppChase: ig && ig.chase, oppHold: ig && ig.hold };
   }
   function buildCondOrders(best, bench, ment, ctx) {
-    const c = CO_PLAN[(ctx && ctx.context) || 'even'];
+    const base = CO_PLAN[(ctx && ctx.context) || 'even'];
+    // Heuristic: when they've been seen pushing forward while behind (our lead), protect it 5'
+    // before they usually do; when they shut up shop while ahead, chase before they do.
+    const before = (ours, theirs) => theirs && theirs.n >= 2 ? Math.max(45, Math.min(ours, theirs.min - 5)) : ours;
+    const c = { ...base, chase1: [before(base.chase1[0], ctx && ctx.oppHold), base.chase1[1]], hold1: before(base.hold1, ctx && ctx.oppChase), hold2: before(base.hold2, ctx && ctx.oppChase) };
     const early = ctx && ctx.oppMent >= 6 ? 5 : 0;
     const used = new Set(best.lineup.map(l => l.slot));
     const freeSlot = prefs => prefs.find(k => !used.has(k)) || null;
@@ -2345,7 +2403,7 @@
     const ids = new Set(starters.map(p => p.id));
     const bench = pickBench(players.filter(p => !ids.has(p.id)));
     const roles = pickSquadRoles(starters);
-    const ctx = matchContext(settings, expected);
+    const ctx = matchContext(settings, expected, scouting);
     return { players, best, settings, bench, roles, ctx, condOrders: buildCondOrders(best, bench, settings.mentality, ctx) };
   }
 
@@ -3249,7 +3307,16 @@
       if ((matchId || bFix) && (force || state.doneMatchKey !== matchKey)) {
         let matchOk = true;
         const mark = async (k, l, f) => { await step(k, l, f); if (!done[k]) matchOk = false; };
-        if (matchId) await mark('scan', 'Opponent scan', async () => { await refreshAll(); const r = opponentReadiness(); return { ok: r.ready, text: r.text }; });
+        say('Reading new results…');
+        // Results first: the plan below is fitted on every division match played so far.
+        const learned = await crawlDivision(60).catch(() => null);
+        if (learned) setSlice('matchBankCrawl', learned);
+        if (matchId) await mark('scan', 'Opponent scan', async () => {
+          await refreshAll();
+          const r = opponentReadiness(), sc = getSlice('opponentScouting') && getSlice('opponentScouting').data, ig = sc && sc.inGame;
+          const habits = ig ? [ig.chase && `chases from ~${ig.chase.min}' when behind`, ig.hold && `sits back from ~${ig.hold.min}' when ahead`].filter(Boolean).join(', ') : '';
+          return { ok: r.ready, text: r.text + (learned ? ` · ${learned.added} new result(s) learned (${learned.total} in bank)` : '') + (habits ? ` · they ${habits}` : '') };
+        });
         // Reserves before the first team: a promotion changes who the first-team plan can pick.
         if (steps.reserves) await mark('reserves', 'Reserves', () => manageReserves(dry));
         if (steps.tactics && matchId) await mark('tactics', 'Tactics & orders', () => applyMatchPlanStep(nm, dry));
@@ -3715,14 +3782,9 @@
     return d;
   }
 
-  // SESSION.is_pro read false/0 on one page while the user has Pro (1111 days, live) — so a
-  // player already on custom training also counts as proof before falling back to groups.
+  // Every player is on custom training (Pro), so the standard groups are never touched (user).
   async function trainingStep(dryRun) {
-    if (SESSION.is_pro || Number(SESSION.pro_days) > 0) return applyCustomTraining(dryRun);
-    await loadTacticsPage();
-    const first = tacticsPageSquad().find(p => bucketFor(p.fp) !== 'GK');
-    const cur = first ? await readCustomTraining(first.id) : null;
-    return cur && cur.custom_on ? applyCustomTraining(dryRun) : applyTrainingGroups(dryRun);
+    return applyCustomTraining(dryRun);
   }
 
   async function applyCustomTraining(dryRun) {
@@ -4756,7 +4818,7 @@
       </div>
       <div class="tma-card">
         <h4>Conditional Orders (set before kickoff) <span class="tma-badge">5 / 5 used</span></h4>
-        <div class="tma-mini" style="margin-bottom:8px;">Timed for ${plan.ctx.context === 'underdog' ? 'an underdog — hold a lead early, chase late' : plan.ctx.context === 'favourite' ? 'a favourite — chase early, protect late' : 'an even match'}${plan.ctx.oppMent >= 6 ? ', 5 minutes sooner against their attacking mentality' : ''} (own heuristic). ${onTacticsPage() ? 'Saved by Apply above.' : 'Apply saves these for you on the Tactics page.'} Substitutes come on in a free slot of their own line.</div>
+        <div class="tma-mini" style="margin-bottom:8px;">Timed for ${plan.ctx.context === 'underdog' ? 'an underdog — hold a lead early, chase late' : plan.ctx.context === 'favourite' ? 'a favourite — chase early, protect late' : 'an even match'}${plan.ctx.oppMent >= 6 ? ', 5 minutes sooner against their attacking mentality' : ''} ${plan.ctx.oppChase && plan.ctx.oppChase.n >= 2 ? `, a lead protected before their usual push (~${plan.ctx.oppChase.min}')` : ''}${plan.ctx.oppHold && plan.ctx.oppHold.n >= 2 ? `, chasing before they usually sit back (~${plan.ctx.oppHold.min}')` : ''} (own heuristic). ${onTacticsPage() ? 'Saved by Apply above.' : 'Apply saves these for you on the Tactics page.'} Substitutes come on in a free slot of their own line.</div>
         ${condOrdersHtml}
       </div>
       ${expectedTacticsHtml}
