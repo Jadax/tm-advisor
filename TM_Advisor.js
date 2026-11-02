@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.19.0
+// @version      3.20.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -60,7 +60,7 @@
  *   SECTION 5M CUSTOM TRAINING       (TM Pro: role templates + per-player tweaks)
  *   SECTION 5N RESERVE TEAM          (demote ≤21 non-squad youths, promote, reserve XI)
  *   SECTION 5O YOUTH PULLS           (hire ≥17 potential where needed; acts only on real potential)
- *   SECTION 5P SCOUTING              (free scouts → own youths; watches for 20-rated scouts)
+ *   SECTION 5P SCOUTING              (keeps 1 youth + 1 senior 20-rated scout; sends free scouts)
  *   SECTION 6  STADIUM ENGINE        (upgrade ROI ranking)
  *   SECTION 7  UI                    (styles, panel; ONE context-relevant
  *                                       tab per page)
@@ -953,20 +953,13 @@
   //   1. /fixtures/club/{id}/  (HTML) — lists recent match links + results.
   //   2. /ajax/match.ajax.php?id={matchId}  (JSON) — full match_data incl. lineup +
   //      mentality/attacking_style/focus_side per side. No HTML scraping needed here at all.
+  // /fixtures/club/<id>/ is built by script (0 match links in the fetched HTML, live 2026-11-02 —
+  // every scan read 0 games), so the played list comes from the fixtures endpoint itself.
+  // Played but dated in the future = simulated ahead (CLAUDE.md), not yet seen by anyone.
   async function fetchOpponentRecentMatchIds(oppClubId, n) {
-    const doc = await fetchDoc('/fixtures/club/' + oppClubId + '/');
-    const seen = new Set();
-    const completed = [];
-    doc.querySelectorAll('a[href*="/matches/"]').forEach(a => {
-      const m = (a.getAttribute('href') || '').match(/\/matches\/(\d+)/);
-      if (!m) return;
-      const id = m[1];
-      if (seen.has(id)) return;
-      const row = a.closest('tr') || a.closest('li') || a.parentElement;
-      const rowText = row ? row.textContent : '';
-      if (/\d+\s*-\s*\d+/.test(rowText)) { seen.add(id); completed.push(id); } // has a score => played
-    });
-    return completed.slice(-n); // document order ≈ chronological; take the most recent n
+    const today = new Date().toISOString().slice(0, 10);
+    return (await fixturesOf(oppClubId)).filter(m => m.result && String(m.date) <= today)
+      .sort((x, y) => String(x.date).localeCompare(String(y.date))).slice(-n).map(m => String(m.id));
   }
 
   async function fetchMatchJson(matchId) {
@@ -1397,20 +1390,30 @@
     return decorated;
   }
   // The squad page has no room to its right, so instead of a scrollbar our cells are narrow and
-  // the name column gives up exactly the overflow (names end in "…", full name on hover).
+  // TM's fixed 160px name box (a div + a fade overlay at 137px, live) gives up the overflow.
   function fitTables() {
     document.querySelectorAll('th.tma-col-r5').forEach(th => {
       const table = th.closest('table');
       if (!table) return;
       table.querySelectorAll('.tma-col-rou, .tma-col-si, .tma-col-r5, td[data-tma-c]').forEach(c => { c.style.padding = '0 3px'; c.style.fontSize = '11px'; c.style.whiteSpace = 'nowrap'; });
-      const box = table.parentElement;
-      const over = box ? table.offsetWidth - box.clientWidth : 0;
-      if (over <= 0) return;
-      const links = [...table.querySelectorAll('a[player_link], a[href*="/players/"]')];
-      const w = Math.max(...links.map(a => a.offsetWidth), 0);
-      links.forEach(a => {
-        a.title = a.title || a.textContent.trim();
-        Object.assign(a.style, { display: 'inline-block', maxWidth: Math.max(70, w - over - 4) + 'px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'bottom' });
+      const row = table.querySelector('tr[data-tma-cols]');
+      const link = row && row.querySelector('a[player_link], a[href*="/players/"]');
+      const col = link ? [...row.children].indexOf(link.closest('td')) : -1;
+      if (col < 0) return;
+      if (!table.dataset.tmaNameW) {
+        const box = table.parentElement, over = box ? table.offsetWidth - box.clientWidth : 0;
+        if (over <= 0) return;
+        table.dataset.tmaNameW = String(Math.max(90, row.children[col].offsetWidth - over - 2));
+      }
+      const w = Number(table.dataset.tmaNameW);
+      table.querySelectorAll('tr').forEach(tr => {
+        const c = tr.children[col];
+        if (!c) return;
+        if (c.tagName === 'TH') { c.style.width = w + 'px'; return; }
+        const div = c.querySelector('div[style*="width"]:not(.text_fade_overlay)');
+        if (div) div.style.width = w + 'px';
+        const fade = c.querySelector('.text_fade_overlay');
+        if (fade) fade.style.marginLeft = Math.max(0, w - 23) + 'px';
       });
     });
   }
@@ -1717,16 +1720,16 @@
           fetchOpponentSquadReal(id).then(players => {
             if (players.length) {
               setSlice('opponent', { id, name: oppName, players, source: 'real-skills' });
-              injectColumnsWhenReady(players, { showRou: true, showSI: true });
+              injectColumnsWhenReady(players, { showRou: true, showSI: true, compact: true });
             } else {
               const fallback = scraped.players.map(p => ({ ...p, _r5: p.recStars != null ? p.recStars * 22 : null }));
               setSlice('opponent', { id, name: oppName, players: fallback, source: 'star-estimate' });
-              injectColumnsWhenReady(fallback, { showRou: true, showSI: true });
+              injectColumnsWhenReady(fallback, { showRou: true, showSI: true, compact: true });
             }
           }).catch(() => {
             const fallback = scraped.players.map(p => ({ ...p, _r5: p.recStars != null ? p.recStars * 22 : null }));
             setSlice('opponent', { id, name: oppName, players: fallback, source: 'star-estimate' });
-            injectColumnsWhenReady(fallback, { showRou: true, showSI: true });
+            injectColumnsWhenReady(fallback, { showRou: true, showSI: true, compact: true });
           });
         }
       } else if (path === '/club/' || path === '/club' || (path.startsWith('/club/') && path.split('/').filter(Boolean).length === 2)) { // own club page is bare /club/
@@ -3314,7 +3317,8 @@
         if (matchId) await mark('scan', 'Opponent scan', async () => {
           await refreshAll();
           const r = opponentReadiness(), sc = getSlice('opponentScouting') && getSlice('opponentScouting').data, ig = sc && sc.inGame;
-          const habits = ig ? [ig.chase && `chases from ~${ig.chase.min}' when behind`, ig.hold && `sits back from ~${ig.hold.min}' when ahead`].filter(Boolean).join(', ') : '';
+          const habits = ig && ig.games ? ([ig.chase && `chase from ~${ig.chase.min}' when behind`, ig.hold && `sit back from ~${ig.hold.min}' when ahead`].filter(Boolean).join(', ')
+            || `made no mentality changes in their last ${ig.games}${ig.subs ? '' : ' (no subs either)'}`) : '';
           return { ok: r.ready, text: r.text + (learned ? ` · ${learned.added} new result(s) learned (${learned.total} in bank)` : '') + (habits ? ` · they ${habits}` : '') };
         });
         // Reserves before the first team: a promotion changes who the first-team plan can pick.
@@ -3803,7 +3807,7 @@
       if (!cur || !cur.custom) { failed.push(p.name); continue; }
       const now6 = [1, 2, 3, 4, 5, 6].map(i => Number(cur.custom['team' + i] && cur.custom['team' + i].points) || 0);
       if (cur.custom_on && now6.join() === plan.dots.join()) continue;
-      changes.push({ p, from: now6, plan });
+      changes.push({ p, from: now6, plan, off: !cur.custom_on });
       if (dryRun) continue;
       await sleep(150);
       await tmPost('/ajax/training_post.ajax.php', customPayload(p.id, cur, plan.dots));
@@ -3813,7 +3817,7 @@
       if (!after || !after.custom_on || got.join() !== plan.dots.join()) failed.push(p.name);
     }
     if (!dryRun) setSlice('trainingPlans', plans);
-    const label = c => `${c.p.name.split(' ').pop()} ${c.from.join('')}→${c.plan.dots.join('')}`;
+    const label = c => `${c.p.name.split(' ').pop()} ${c.off && c.from.join('') === c.plan.dots.join('') ? 'custom training switched on' : c.from.join('') + '→' + c.plan.dots.join('')}`;
     if (!changes.length && !failed.length) return { ok: true, text: `all ${rows.length} outfield plans already right` };
     return { ok: !failed.length, text: (dryRun ? 'would change ' : 'changed ') + `${changes.length}: ${changes.map(label).join(', ')}` + (failed.length ? ` — not saved/verified: ${failed.join(', ')}` : ''), changes };
   }
@@ -4014,60 +4018,103 @@
   /* ============================================================
    *  SECTION 5P — SCOUTING
    *  ------------------------------------------------------------
-   *  Sends free scouts to your own youths first (A + reserves, youngest
-   *  first) who have no report from a real scout in the last 8 weeks.
-   *  User rule: only scouts with 20 in the stats that matter are worth
-   *  having — with none hired, the step watches the hire list and names any
-   *  that qualify (it never hires: that's your call and your money).
+   *  Keeps ONE youth scout (20 Yth) and ONE senior scout (20 Sen) — user rule:
+   *  anything less isn't worth the wage, and a scout with 20 in both is a waste
+   *  (one player at a time, inflated wage). The guide: Yth judges players ≤19,
+   *  Sen 20+, Dev the bloom, Phy/Tac/Tec the specialist peaks, Psy the hidden
+   *  traits. Free scouts then go to own players without a fresh report: the
+   *  youth scout to the ≤19s, the senior scout to the 20+ (youngest first).
    * ============================================================ */
   const SCOUT_MIN = 20;
   const SCOUT_REPORT_FRESH_MS = 8 * 7 * 864e5;
+  const SCOUT_COLS = ['sen', 'yth', 'phy', 'tac', 'tec', 'dev', 'psy'];
+  const SCOUT_BUDGET_SHARE = 0.05; // heuristic: sign-on fee + 26 weeks' wage within 5% of cash
   async function scoutInfo(playerId) {
     return JSON.parse(await tmPost('/ajax/players_get_info.ajax.php', { player_id: playerId, type: 'scout', show_non_pro_graphs: true }));
   }
-  async function hireableTopScouts() {
-    const doc = await fetchDoc('/scouts/hire/');
+  // Rows of /scouts/ (yours) and /scouts/hire/ share the layout: name (+ "Wage: 76,868, Sign-on
+  // fee: 6 Mil" on the hire list), then Sen Yth Phy Tac Tec Dev Psy. A blank cell reads as 0.
+  function parseScoutRows(doc) {
     const out = [];
     doc.querySelectorAll('tr').forEach(tr => {
       const td = [...tr.querySelectorAll('td')];
       if (td.length < 8) return;
-      const vals = td.slice(1, 8).map(x => Number(x.textContent.trim()) || 0); // Sen Yth Phy Tac Tec Dev Psy
-      const names = ['Sen', 'Yth', 'Phy', 'Tac', 'Tec', 'Dev', 'Psy'];
-      const twenties = names.filter((n, i) => vals[i] >= SCOUT_MIN && n !== 'Sen' && n !== 'Psy');
-      if (twenties.length) out.push(`${td[0].textContent.trim().split('(')[0].trim()} (20 in ${twenties.join('/')})`);
+      const nameEl = td[0].querySelector('span') || td[0];
+      const sub = td[0].textContent;
+      const wage = sub.match(/Wage:\s*([\d,]+)/), fee = sub.match(/Sign-on fee:\s*([\d.]+)\s*(Mil|K)?/i);
+      const btn = tr.querySelector('a[href*="hire_scout_pop"]');
+      const s = { name: nameEl.textContent.replace(/\(\d+ Years\)/, '').replace(/\s+/g, ' ').trim(),
+        id: btn ? ((btn.getAttribute('href') || '').match(/,\s*(\d+)\s*\)/) || [])[1] : null,
+        wage: wage ? Number(wage[1].replace(/,/g, '')) : 0,
+        fee: fee ? Number(fee[1]) * (/mil/i.test(fee[2] || '') ? 1e6 : /k/i.test(fee[2] || '') ? 1e3 : 1) : 0 };
+      SCOUT_COLS.forEach((k, i) => { s[k] = Number(td[i + 1].textContent.trim()) || 0; });
+      out.push(s);
     });
     return out;
   }
+  const scoutRole = s => s.yth >= SCOUT_MIN && s.sen < SCOUT_MIN ? 'youth' : s.sen >= SCOUT_MIN && s.yth < SCOUT_MIN ? 'senior' : s.sen >= SCOUT_MIN ? 'both' : null;
+  // Heuristic ranking after the must-have 20: youths need the bloom read (Dev — the guide's own
+  // tip is 19-20 in Yth AND Dev), seniors the specialist peaks.
+  const scoutRank = (s, role) => role === 'youth' ? s.dev * 4 + s.psy * 2 + s.phy + s.tac + s.tec : (s.phy + s.tac + s.tec) * 2 + s.psy * 2 + s.dev;
+  function bestScoutFor(list, role) {
+    const key = role === 'youth' ? 'yth' : 'sen';
+    const ok = list.filter(s => s[key] >= SCOUT_MIN);
+    const single = ok.filter(s => scoutRole(s) === role);
+    return (single.length ? single : ok).sort((x, y) => scoutRank(y, role) - scoutRank(x, role) || x.wage - y.wage)[0] || null;
+  }
+  async function hireMissingScouts(mine, dryRun) {
+    const covered = r => mine.some(s => scoutRole(s) === r || scoutRole(s) === 'both');
+    const need = ['youth', 'senior'].filter(r => !covered(r));
+    if (!need.length) return [];
+    const market = parseScoutRows(await fetchDoc('/scouts/hire/'));
+    const cash = Number(SESSION.cash) || 0;
+    const lines = [];
+    for (const role of need) {
+      const s = bestScoutFor(market, role);
+      if (!s) { lines.push(`no ${role} scout with 20 ${role === 'youth' ? 'Yth' : 'Sen'} on the hire list yet`); continue; }
+      const stats = SCOUT_COLS.map(k => k[0].toUpperCase() + k.slice(1) + ' ' + s[k]).join('/');
+      if (!s.id) { lines.push(`${s.name} qualifies as ${role} scout but has no Hire button`); continue; }
+      if (s.fee + 26 * s.wage > SCOUT_BUDGET_SHARE * cash) { lines.push(`${s.name} (${role}, ${stats}) is too dear: ${fmtMoney(s.fee)} fee + ${fmtMoney(s.wage)}/wk`); continue; }
+      if (dryRun) { lines.push(`would hire ${s.name} as ${role} scout (${stats}; ${fmtMoney(s.fee)} + ${fmtMoney(s.wage)}/wk)`); continue; }
+      await tmPost('/scouts/hire/', { session_id: SESSION.id, scout_hire: 1, scout: s.id }); // the page's own hire form
+      await sleep(300);
+      const after = parseScoutRows(await fetchDoc('/scouts/'));
+      const got = after.some(x => x.name === s.name);
+      if (got) { mine.push(s); market.splice(market.indexOf(s), 1); }
+      lines.push(got ? `hired ${s.name} as ${role} scout (${stats}; ${fmtMoney(s.fee)} + ${fmtMoney(s.wage)}/wk)` : `${s.name} not hired — not on your scouts page after the post`);
+    }
+    return lines;
+  }
   async function scoutingStep(dryRun) {
+    const mine = parseScoutRows(await fetchDoc('/scouts/'));
+    const lines = await hireMissingScouts(mine, dryRun);
     await loadTacticsPage();
     const squadA = tacticsPageSquad();
     const squadB = squadFromTacticsData(JSON.parse(await tmPost('/ajax/tactics_get.ajax.php', tmBase(1))));
     const info = await scoutInfo(squadA[0].id);
     const scouts = Object.values((info && info.scouts) || {});
-    if (!scouts.length) {
-      const top = await hireableTopScouts();
-      return { ok: true, text: top.length ? `no scouts hired — on the market now: ${top.join(', ')} (Scouts → Hire)` : 'no scouts hired, and nobody on the hire list has a 20 in Yth/Phy/Tac/Tec/Dev yet' };
-    }
-    const free = scouts.filter(s => !s.away);
-    if (!free.length) return { ok: true, text: `all ${scouts.length} scout(s) out (${scouts.map(s => s.returns || 'away').join(', ')})` };
-    const youths = squadA.concat(squadB).filter(p => (Number(p.age) || 99) < RESERVE_MAX_AGE + 1).sort((a, b) => a.age - b.age);
-    const targets = [];
-    for (const p of youths) {
-      if (targets.length >= free.length) break;
+    if (!scouts.length) return { ok: true, text: lines.join('; ') || 'no scouts hired' };
+    const roleOf = sc => { const row = mine.find(m => m.name === `${sc.name} ${sc.surname}`.trim()); return row ? scoutRole(row) : null; };
+    const free = scouts.filter(sc => !sc.away);
+    if (!free.length) return { ok: true, text: lines.concat(`all ${scouts.length} scout(s) out (${scouts.map(sc => sc.returns || 'away').join(', ')})`).join('; ') };
+    const fresh = async p => {
       await sleep(120);
       const reports = Object.values(((await scoutInfo(p.id)) || {}).reports || {});
-      const fresh = reports.some(r => String(r.scoutid) !== '0' && r.done && now() - new Date(r.done).getTime() < SCOUT_REPORT_FRESH_MS);
-      if (!fresh) targets.push(p);
-    }
-    if (!targets.length) return { ok: true, text: 'every youth has a recent scout report' };
-    const sorted = [...free].sort((a, b) => ((+b.youths || 0) + (+b.development || 0)) - ((+a.youths || 0) + (+a.development || 0)));
-    const lines = [];
-    for (let i = 0; i < targets.length && i < sorted.length; i++) {
-      const s = sorted[i], p = targets[i];
-      if (dryRun) { lines.push(`would send ${s.name} ${s.surname} to ${p.name}`); continue; }
+      return reports.some(r => String(r.scoutid) !== '0' && r.done && now() - new Date(r.done).getTime() < SCOUT_REPORT_FRESH_MS);
+    };
+    const all = squadA.concat(squadB).sort((x, y) => (Number(x.age) || 99) - (Number(y.age) || 99));
+    const taken = new Set();
+    for (const sc of free) {
+      const role = roleOf(sc);
+      const pool = all.filter(p => !taken.has(String(p.id)) && (role === 'senior' ? Number(p.age) >= 20 : role === 'youth' ? Number(p.age) <= 19 : Number(p.age) <= RESERVE_MAX_AGE));
+      let target = null;
+      for (const p of pool) { if (!(await fresh(p))) { target = p; break; } }
+      if (!target) { lines.push(`${sc.name} ${sc.surname}: everyone in range has a recent report`); continue; }
+      taken.add(String(target.id));
+      if (dryRun) { lines.push(`would send ${sc.name} ${sc.surname} to ${target.name}`); continue; }
       await sleep(200);
-      await tmPost('/ajax/players_get_info.ajax.php', { player_id: p.id, type: 'scout', scout_id: s.id, show_non_pro_graphs: true });
-      lines.push(`sent ${s.name} ${s.surname} to ${p.name}`);
+      await tmPost('/ajax/players_get_info.ajax.php', { player_id: target.id, type: 'scout', scout_id: sc.id, show_non_pro_graphs: true });
+      lines.push(`sent ${sc.name} ${sc.surname}${role ? ` (${role})` : ''} to ${target.name}`);
     }
     return { ok: true, text: lines.join('; ') };
   }
