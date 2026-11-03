@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.21.0
+// @version      3.22.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -975,7 +975,36 @@
     return { value: sorted[0][0], seenIn: sorted[0][1] };
   }
 
-  async function buildOpponentScoutingReport(oppClubId, oppSquad) {
+  // Our record against them: /ajax/match_h2h.ajax.php (as "TM - Random Club HeadToHead" 1.0) →
+  // {matches: {season: [{id, date, hometeam, result, matchtype}]}}.
+  async function fetchHeadToHead(ourId, oppId) {
+    const d = JSON.parse(await (await fetch(`/ajax/match_h2h.ajax.php?home_team=${encodeURIComponent(ourId)}&away_team=${encodeURIComponent(oppId)}`, { credentials: 'same-origin' })).text() || '{}');
+    const all = [];
+    Object.values((d && d.matches) || {}).forEach(list => (list || []).forEach(m => all.push(m)));
+    const h = { w: 0, d: 0, l: 0, gf: 0, ga: 0, last: [] };
+    all.filter(m => /^\d+-\d+$/.test(String(m.result))).sort((a, b) => String(b.date).localeCompare(String(a.date))).forEach(m => {
+      const [hg, ag] = String(m.result).split('-').map(Number);
+      const home = String(m.hometeam) === String(ourId), f = home ? hg : ag, a = home ? ag : hg;
+      h.gf += f; h.ga += a;
+      if (f > a) h.w++; else if (f === a) h.d++; else h.l++;
+      if (h.last.length < 5) h.last.push(f > a ? 'W' : f === a ? 'D' : 'L');
+    });
+    return h;
+  }
+  // The other manager's last login: tooltip.ajax.php {club_id} → club.last_seen ("3. November"),
+  // as "TM - League Last Login" 2.4 reads it. An inactive manager won't change a thing before kickoff.
+  async function fetchManagerLastSeen(clubIdToCheck) {
+    const d = JSON.parse(await tmPost('/ajax/tooltip.ajax.php', { club_id: clubIdToCheck }));
+    const txt = d && d.club && d.club.last_seen ? String(d.club.last_seen).replace(/<[^>]+>/g, '').trim() : null;
+    const m = txt && txt.match(/(\d{1,2})\.?\s*([A-Za-z]+)/);
+    let days = null;
+    if (m) {
+      const t = Date.parse(`${m[1]} ${m[2]} ${new Date().getFullYear()}`);
+      if (!isNaN(t)) days = Math.max(0, Math.floor((now() - (t > now() ? Date.parse(`${m[1]} ${m[2]} ${new Date().getFullYear() - 1}`) : t)) / 864e5));
+    }
+    return { text: txt, days };
+  }
+  async function buildOpponentScoutingReport(oppClubId, oppSquad, ourId) {
     const matchIds = await fetchOpponentRecentMatchIds(oppClubId, 5);
     const mentalities = [], styles = [], focuses = [];
     const appearances = {}; // playerId -> times featured
@@ -1023,6 +1052,8 @@
       likelyXI, recentFormation: fetched ? (defLine + '-' + midLine + '-' + fwdLine) : null,
       inGame: { games: fetched, chase: inGameSummary(chase), hold: inGameSummary(hold), subs: inGameSummary(subs) },
       conceded,
+      h2h: await fetchHeadToHead(ourId || clubId, oppClubId).catch(() => null),
+      manager: await fetchManagerLastSeen(oppClubId).catch(() => null),
     };
   }
   // What a side did DURING its matches — mentality changes (with the score at that moment) and
@@ -2134,7 +2165,27 @@
       // live: the reserves' 1.5x youth boost made them look far stronger and picked Attacking.
       return { slot: k, bucket: slotBucket(k), side: slotSide(k), player: ok ? p : null, effectiveR5: ok ? (boost ? slotRating(p, k) : v) : 0, penalty: ok ? tmPositionPenalty(p.fp, SLOT_NUM[k]) : 0 };
     });
+    shareRoutine(lineup);
     return { lineup, totalRec: lineup.reduce((s, l) => s + l.effectiveR5, 0), formation: formationKey };
+  }
+  // Routine sharing — "TM - League Squad Analyzer" 1.1.0: per line (GK+D / DM+M / OM+F) the
+  // lowest-routine starter plays at min(his + 0.25 x the line's highest, the 2nd-lowest, 40).
+  // So a youth next to veterans is worth more than his own routine says.
+  const ROUTINE_SHARE = 0.25, ROUTINE_SHARE_CAP = 40;
+  const lineOf = k => /^(gk|d[lrc]|dc[lr])$/.test(k) ? 'D' : /^(dm|m)/.test(k) ? 'M' : 'F';
+  function shareRoutine(lineup) {
+    ['D', 'M', 'F'].forEach(line => {
+      const g = lineup.filter(l => l.player && lineOf(l.slot) === line).sort((a, b) => (Number(a.player.routine) || 0) - (Number(b.player.routine) || 0));
+      if (g.length < 2) return;
+      const rou = l => Number(l.player.routine) || 0;
+      const low = g[0], min = rou(low);
+      if (min >= ROUTINE_SHARE_CAP) return;
+      const shared = Math.round(Math.min(min + rou(g[g.length - 1]) * ROUTINE_SHARE, rou(g[1]), ROUTINE_SHARE_CAP) * 10) / 10;
+      if (shared <= min) return;
+      low.sharedRoutine = shared;
+      low.effectiveR5 = slotRating({ ...low.player, routine: shared }, low.slot);
+    });
+    return lineup;
   }
 
   // Pure strength pick across every formation. No meta bias or counter nudge: on a real squad
@@ -2211,7 +2262,7 @@
     if (saved.length >= 9) {
       const lineup = saved.map(x => ({ slot: x.slot, bucket: slotBucket(x.slot), side: slotSide(x.slot), player: byId[String(x.id)], effectiveR5: slotRating(byId[String(x.id)], x.slot) }))
         .filter(l => isFinite(l.effectiveR5));
-      return { source: 'expected', lineup };
+      return { source: 'expected', lineup: shareRoutine(lineup) };
     }
     const fit = all.filter(p => (!p.ban || p.ban === '0') && !p.inj);
     const best = bestFormation((fit.length >= 11 ? fit : all).map(p => ({ ...p })));
@@ -3974,7 +4025,7 @@
     const opponent = opp.length ? { id: fix.oppId, name: fix.oppName, players: opp, source: 'real-skills' } : null;
     const expected = opponent ? await fetchNextMatchExpected(fix.matchUrl, fix.oppId, opp).catch(() => null) : null;
     const boost = p => (Number(p.age) || 99) < RESERVE_MAX_AGE + 1 ? RESERVE_YOUTH_BOOST : 1;
-    const scouting = opponent ? await buildOpponentScoutingReport(fix.oppId, opp).catch(() => null) : null;
+    const scouting = opponent ? await buildOpponentScoutingReport(fix.oppId, opp, SESSION.b_team).catch(() => null) : null;
     const plan = buildMatchPlan(squad, opponent, scouting, expected, { boost, weAreHome: fix.weAreHome, noEvidence: true, restBanRisk: restBanRisk() });
     const youths = plan.best.lineup.filter(l => l.player && boost(l.player) > 1).length;
     const record = ok => setSlice('reservePlan', {
@@ -4848,6 +4899,21 @@
         </div>`;
     })() : '';
 
+    const intelHtml = (() => {
+      const sc = scoutSlice && scoutSlice.data;
+      if (!sc) return '';
+      const rows = [];
+      const h = sc.h2h;
+      if (h && h.w + h.d + h.l) rows.push(['Head to head', `W${h.w} D${h.d} L${h.l} · goals ${h.gf}-${h.ga}${h.last.length ? ' · last ' + h.last.join('') : ''}`]);
+      if (sc.manager && sc.manager.text) rows.push(['Their manager', `last seen ${sc.manager.days != null ? (sc.manager.days === 0 ? 'today' : sc.manager.days + ' days ago') : sc.manager.text}${sc.manager.days >= 14 ? ' — inactive: their saved XI and tactics won\'t change' : ''}`]);
+      const conc = sc.conceded ? Object.entries(sc.conceded).filter(([, x]) => x.a >= 4).map(([k, x]) => ({ k, ...x, r: x.sh / x.a })).sort((a, b) => b.r - a.r) : [];
+      if (conc.length) rows.push(['They concede to', conc.slice(0, 3).map(x => `${ATT_STYLE[x.k]} ${Math.round(x.r * 100)}% shots (${x.g} goals / ${x.a})`).join(' · ')]);
+      const ig = sc.inGame;
+      if (ig && ig.games) rows.push(['In-game changes', [ig.chase && `attack from ~${ig.chase.min}' when behind`, ig.hold && `defend from ~${ig.hold.min}' when ahead`].filter(Boolean).join(', ') || `none in their last ${ig.games}`]);
+      if (!rows.length) return '';
+      return `<div class="tma-card"><h4>Opponent intel <span class="tma-badge">last ${sc.sampleSize || 0} games</span></h4>${rows.map(([k, v]) => `<div class="tma-row"><span>${k}</span><span>${esc(v)}</span></div>`).join('')}</div>`;
+    })();
+
     // Training recommendations (SECTION 5E): weak primary skills to train, plateau flags,
     // and priority youths in their development-bonus window. Shown even without an opponent.
     const trainingRecs = generateTrainingRecommendations(players);
@@ -4914,6 +4980,7 @@
         ${condOrdersHtml}
       </div>
       ${expectedTacticsHtml}
+      ${intelHtml}
       ${reservePlanHtml()}
       ${progressHtml}
       ${trainingHtml}
