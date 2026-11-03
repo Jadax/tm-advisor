@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.20.0
+// @version      3.21.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -980,6 +980,7 @@
     const mentalities = [], styles = [], focuses = [];
     const appearances = {}; // playerId -> times featured
     const chase = [], hold = [], subs = [];
+    const conceded = {};
     let fetched = 0;
     for (const id of matchIds) {
       try {
@@ -997,6 +998,7 @@
         if (lineup) Object.keys(lineup).forEach(pid => { appearances[pid] = (appearances[pid] || 0) + 1; });
         const b = opponentInGame(data, String(oppClubId), lineup);
         chase.push(...b.chase); hold.push(...b.hold); subs.push(...b.subs);
+        concededByStyle(data, String(oppClubId), conceded);
         fetched++;
       } catch (e) { console.warn('TM Advisor: opponent match fetch failed for', id, e); }
     }
@@ -1020,6 +1022,7 @@
       // the count of position buckets among their most-used players over the sampled games.
       likelyXI, recentFormation: fetched ? (defLine + '-' + midLine + '-' + fwdLine) : null,
       inGame: { games: fetched, chase: inGameSummary(chase), hold: inGameSummary(hold), subs: inGameSummary(subs) },
+      conceded,
     };
   }
   // What a side did DURING its matches — mentality changes (with the score at that moment) and
@@ -1043,6 +1046,19 @@
       if (pr.sub && (ours.has(String(pr.sub.player_out)) || ours.has(String(pr.sub.player_in)))) out.subs.push({ min });
     })));
     return out;
+  }
+  // Report events carry `type` (prefix = how the attack was built) and `club` (who attacked);
+  // prefixes per "TM - Season Match Analysis" 1.2.0. Keyed by our attacking-style ids.
+  const ATTACK_PREFIX_STYLE = { cou: 2, kco: 2, win: 3, sho: 4, klo: 5, lon: 5, thr: 6 };
+  function concededByStyle(data, teamId, into) {
+    Object.values(data.report || {}).forEach(evts => (evts || []).forEach(evt => {
+      if (!evt || !evt.type || evt.club == null || String(evt.club) === teamId) return;
+      const st = ATTACK_PREFIX_STYLE[String(evt.type).replace(/[0-9]+.*/, '')];
+      if (!st) return;
+      const ps = evt.parameters || [], x = into[st] || (into[st] = { a: 0, sh: 0, g: 0 });
+      x.a++;
+      if (ps.some(q => q.goal)) { x.g++; x.sh++; } else if (ps.some(q => q.shot)) x.sh++;
+    }));
   }
   function inGameSummary(list) {
     if (!list.length) return null;
@@ -1687,10 +1703,15 @@
         return `<div style="min-width:78px;"><div style="font-size:9.5px;color:#8a94a0;">${label}</div><div style="font-size:12px;color:#e4e7ea;font-weight:600;">${v.toFixed(2)}</div></div>`;
       };
       const catRow = Object.entries(cats).map(([k, v]) => catChip(k, v)).join('');
+      const SLOTS_SHOWN = ['gk', 'dc', 'dl', 'dr', 'dmc', 'dml', 'dmr', 'mc', 'ml', 'mr', 'omc', 'oml', 'omr', 'fc'];
+      const best = SLOTS_SHOWN.map(k => ({ k, v: slotRating(p, k), pen: tmPositionPenalty(p.fp, SLOT_NUM[k]) }))
+        .filter(x => x.v > LAST_RESORT_RATING).sort((a, b) => b.v - a.v).slice(0, 4);
+      const bestRow = best.map(x => `<span style="margin-right:12px;"><b>${x.k.toUpperCase()}</b> ${x.v.toFixed(1)}${x.pen ? ` <span style="color:#d97a70;">−${x.pen * 10}%</span>` : ''}</span>`).join('');
 
       box.innerHTML = `
         <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;">${statRow}</div>
         <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px solid #2b323b80;">${catRow}</div>
+        ${bestRow ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid #2b323b80;"><span style="font-size:9.5px;color:#8a94a0;text-transform:uppercase;letter-spacing:.04em;margin-right:8px;">Best positions (R5 incl. TM's position penalty)</span>${bestRow}</div>` : ''}
       `;
       const anchor = document.querySelector('.column1_a .std') || document.querySelector('.box_body') || document.querySelector('.main_center');
       if (anchor) anchor.insertBefore(box, anchor.firstChild);
@@ -2263,6 +2284,21 @@
     reasoning.push('Attacking style "' + ATT_STYLE[style] + '" (own heuristic) — ' + (style === 1
       ? 'no style clearly fits the XI better than another (top two within 0.5 skill points), so Balanced.'
       : 'clearest fit for the XI\'s skills') + ' (Cro ' + cro.toFixed(1) + ', Pas ' + pas.toFixed(1) + ', Tec ' + tec.toFixed(1) + ', Lon ' + lon.toFixed(1) + ', Pac ' + pac.toFixed(1) + ').');
+    // Heuristic: attack the way they leak. A style they concede shots from clearly more often
+    // (≥8 attacks seen, ≥1.4x their average shot rate) wins if our XI suits it nearly as well.
+    const conc = scouting && scouting.conceded;
+    if (conc) {
+      const tot = Object.values(conc).reduce((t, x) => ({ a: t.a + x.a, sh: t.sh + x.sh }), { a: 0, sh: 0 });
+      const avgRate = tot.a ? tot.sh / tot.a : 0;
+      const fitOf = Object.fromEntries(styleRank);
+      const weak = Object.entries(conc).map(([k, x]) => ({ k: Number(k), a: x.a, g: x.g, rate: x.a ? x.sh / x.a : 0 }))
+        .filter(x => x.a >= 8 && avgRate > 0 && x.rate >= 1.4 * avgRate && fitOf[x.k] != null && styleRank[0][1] - fitOf[x.k] <= 1)
+        .sort((x, y) => y.rate - x.rate)[0];
+      if (weak && weak.k !== style) {
+        reasoning.push(`They concede most against ${ATT_STYLE[weak.k]}: ${Math.round(weak.rate * 100)}% of those attacks became shots (${weak.g} goals in ${weak.a}) vs ${Math.round(avgRate * 100)}% overall in their recent games → ${ATT_STYLE[weak.k]} (own heuristic).`);
+        style = weak.k;
+      }
+    }
 
     // Focus side: which flank to attack down. This is NOT just "which of our sides is
     // stronger" — attacking down our left means attacking INTO their right-back/right-DM
@@ -3734,6 +3770,10 @@
     return CUSTOM_GROUPS.map(g => g.reduce((a, k) => a + ((latest.sk[k] || 0) - (base.sk[k] || 0)), 0));
   }
 
+  // Points a custom group earns per dot count (0-4) — "TM - Players Train" v10 calculatePoint();
+  // 2-2-2-2-2-2 = 102, matching the guide's "max 102/102".
+  const DOT_POINTS = [0, 10, 17, 23, 25];
+  const planPoints = dots => dots.reduce((a, d) => a + DOT_POINTS[d], 0);
   function customPlan(p, slot, tiHistory) {
     const key = keySkillsFor(slot), role = ROLE_OF_KEY[key];
     const age = Number(p.age) || 0;
@@ -3741,7 +3781,9 @@
     if (age >= CUSTOM_AGE_BALANCED) return { dots: [...CUSTOM_BALANCED], role, why: `age ${Math.floor(age)}: development is done — balanced 2-2-2-2-2-2 keeps TI at the full 102/102` };
     if (age >= 22 && recentTi.length >= 4 && recentTi.every(v => v <= 0)) return { dots: [...CUSTOM_BALANCED], role, why: 'TI ≤ 0 for 4 weeks: looks fully peaked — balanced at 102/102 (guide)' };
     const [prim, sec] = KEY_SKILLS[key];
-    const weight = k => prim.includes(k) ? 2 : sec.includes(k) ? 1 : 0;
+    // Non-key skills still count a little (they still feed R5 and SI): at 0 a group of them
+    // looked free to strip, and dots piled into 4th-dot slots worth 2 points (88/102 TI).
+    const weight = k => prim.includes(k) ? 2 : sec.includes(k) ? 1 : 0.25;
     const sk = k => Number(p.skills && p.skills[k]) || 0;
     const gains = groupGains(p.id);
     const dots = [...CUSTOM_TEMPLATES[role]];
@@ -3751,13 +3793,14 @@
     });
     const moves = [];
     for (let m = 0; m < 2; m++) {
-      const from = dots.map((d, i) => ({ i, r: d > 0 ? need[i] / d : Infinity })).filter(x => dots[x.i] > 0).sort((a, b) => a.r - b.r)[0];
-      const to = dots.map((d, i) => ({ i, r: d < 4 ? need[i] / (d + 1) : -1 })).sort((a, b) => b.r - a.r)[0];
+      // Value of a dot = the group's need x the points that dot adds (or removes).
+      const from = dots.map((d, i) => ({ i, r: d > 0 ? need[i] * (DOT_POINTS[d] - DOT_POINTS[d - 1]) : Infinity })).filter(x => dots[x.i] > 0).sort((a, b) => a.r - b.r)[0];
+      const to = dots.map((d, i) => ({ i, r: d < 4 ? need[i] * (DOT_POINTS[d + 1] - DOT_POINTS[d]) : -1 })).sort((a, b) => b.r - a.r)[0];
       if (!from || !to || from.i === to.i || to.r < from.r * 1.5) break; // only clearly better moves
       dots[from.i]--; dots[to.i]++;
       moves.push(`${CUSTOM_GROUPS[from.i].join('/')} → ${CUSTOM_GROUPS[to.i].join('/')}`);
     }
-    return { dots, role, why: `${role} template${moves.length ? '; moved ' + moves.join(', ') : ''}` };
+    return { dots, role, why: `${role} template${moves.length ? '; moved ' + moves.join(', ') : ''} — ${planPoints(dots)}/102 training points` };
   }
 
   // Training slot per player: his slot in the first team's best XI, else his best natural slot.
@@ -4055,7 +4098,9 @@
   const scoutRole = s => s.yth >= SCOUT_MIN && s.sen < SCOUT_MIN ? 'youth' : s.sen >= SCOUT_MIN && s.yth < SCOUT_MIN ? 'senior' : s.sen >= SCOUT_MIN ? 'both' : null;
   // Heuristic ranking after the must-have 20: youths need the bloom read (Dev — the guide's own
   // tip is 19-20 in Yth AND Dev), seniors the specialist peaks.
-  const scoutRank = (s, role) => role === 'youth' ? s.dev * 4 + s.psy * 2 + s.phy + s.tac + s.tec : (s.phy + s.tac + s.tec) * 2 + s.psy * 2 + s.dev;
+  // "TM - Players Scout" v9 trusts a report's potential only from Sen/Yth ≥19 AND Dev ≥19, so Dev
+  // weighs heavily for both roles; the rest of the ranking is a heuristic.
+  const scoutRank = (s, role) => role === 'youth' ? s.dev * 4 + s.psy * 2 + s.phy + s.tac + s.tec : s.dev * 3 + (s.phy + s.tac + s.tec) * 1.5 + s.psy * 2;
   function bestScoutFor(list, role) {
     const key = role === 'youth' ? 'yth' : 'sen';
     const ok = list.filter(s => s[key] >= SCOUT_MIN);
