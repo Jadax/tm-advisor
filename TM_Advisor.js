@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.22.0
+// @version      3.22.1
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -3350,7 +3350,10 @@
     const saved = await readSavedTactic();
     const changes = tacticDiff(target, saved);
     const settings = `${MENTALITY[plan.settings.mentality]} / ${ATT_STYLE[plan.settings.style]} / ${FOCUS_SIDE[plan.settings.focus]}`;
-    if (dryRun) return { ok: true, text: changes.length ? `would change ${changes.length} (${changes.map(c => c[0]).join(', ')}) — ${settings}` : 'already matches the plan' };
+    if (dryRun) {
+      if (!changes.length) recordPrediction(plan); // nothing to write: what's saved IS the plan, so the chip may say so
+      return { ok: true, text: changes.length ? `would change ${changes.length} (${changes.map(c => c[0]).join(', ')}) — ${settings}` : 'already matches the plan' };
+    }
     if (changes.length) { setSlice('tacticsBackup', saved); await writeTactic(target, saved); }
     const mismatches = tacticMismatches(target, await readSavedTactic());
     if (mismatches.length) return { ok: false, text: `saved, but these didn't stick: ${mismatches.join(', ')}` };
@@ -4905,7 +4908,7 @@
       const rows = [];
       const h = sc.h2h;
       if (h && h.w + h.d + h.l) rows.push(['Head to head', `W${h.w} D${h.d} L${h.l} · goals ${h.gf}-${h.ga}${h.last.length ? ' · last ' + h.last.join('') : ''}`]);
-      if (sc.manager && sc.manager.text) rows.push(['Their manager', `last seen ${sc.manager.days != null ? (sc.manager.days === 0 ? 'today' : sc.manager.days + ' days ago') : sc.manager.text}${sc.manager.days >= 14 ? ' — inactive: their saved XI and tactics won\'t change' : ''}`]);
+      if (sc.manager && sc.manager.text) rows.push(['Their manager', `last seen ${sc.manager.days != null ? (sc.manager.days === 0 ? 'today' : sc.manager.days === 1 ? 'yesterday' : sc.manager.days + ' days ago') : sc.manager.text}${sc.manager.days >= 14 ? ' — inactive: their saved XI and tactics won\'t change' : ''}`]);
       const conc = sc.conceded ? Object.entries(sc.conceded).filter(([, x]) => x.a >= 4).map(([k, x]) => ({ k, ...x, r: x.sh / x.a })).sort((a, b) => b.r - a.r) : [];
       if (conc.length) rows.push(['They concede to', conc.slice(0, 3).map(x => `${ATT_STYLE[x.k]} ${Math.round(x.r * 100)}% shots (${x.g} goals / ${x.a})`).join(' · ')]);
       const ig = sc.inGame;
