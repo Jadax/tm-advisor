@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.27.0
+// @version      3.28.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -3118,6 +3118,7 @@
     if (!sum0) return p;
     let gain = 0;
     for (let y = 0; y < years; y++) gain += seasonGain(p, age0 + y, y === 0 ? recentTi(p) : null);
+    if (gain > 0 && p.scout && p.scout.dev && DEV_LEFT[p.scout.dev] != null) gain *= DEV_LEFT[p.scout.dev];
     const out = { ...p, age: age0 + years };
     if (Math.abs(gain) < 0.05) return out;
     const keys = (isGK ? SKILL_KEYS_GK : SKILL_KEYS_OUT).filter(k => p.skills[k] != null && (gain > 0 ? Number(p.skills[k]) < 20 : true));
@@ -3125,6 +3126,19 @@
     out.skills = { ...p.skills };
     let applied = 0;
     keys.forEach(k => { const v0 = Number(out.skills[k]); const v1 = gain > 0 ? addTrained(v0, gain / keys.length) : Math.max(1, v0 + gain / keys.length); out.skills[k] = v1; applied += v1 - v0; });
+    // A scouted peak caps that group's skill sum ("TM - Players Scout" v9 peak sums); TM
+    // reassigns training on peaked skills elsewhere, but we simply stop at the cap.
+    if (gain > 0 && p.scout && p.scout.peaks) {
+      const groups = isGK ? { phy: ['str', 'sta', 'pac', 'jum'], tac: ['one', 'ari', 'com'], tec: ['han', 'ref', 'kic', 'thr'] }
+        : { phy: ['str', 'sta', 'pac', 'hea'], tac: ['mar', 'tac', 'wor', 'pos'], tec: ['pas', 'cro', 'tec', 'fin', 'lon', 'set'] };
+      Object.entries(p.scout.peaks).forEach(([g, lvl]) => {
+        const cap = PEAK_SUMS[isGK ? 'gk' : 'out'][g][lvl - 1];
+        const ks = groups[g], sumNew = ks.reduce((t, k) => t + Number(out.skills[k] || 0), 0), sumOld = ks.reduce((t, k) => t + Number(p.skills[k] || 0), 0);
+        if (cap == null || sumNew <= cap || sumNew <= sumOld) return;
+        const keep = Math.max(0, (cap - sumOld) / (sumNew - sumOld));
+        ks.forEach(k => { const v0 = Number(p.skills[k] || 0), v1 = Number(out.skills[k] || 0); const v = v0 + (v1 - v0) * keep; applied -= v1 - v; out.skills[k] = v; });
+      });
+    }
     const w = isGK ? 48717927500 : 263533760000;
     out.asi = Math.round(Math.pow(Math.max(1, sum0 + applied), 7) / w); // inverse of skillSumFromSI
     out.plot = null; // measured TI belongs to today's player, not the projected one
@@ -3165,7 +3179,8 @@
     const all = sl && sl.data ? sl.data : [];
     const bTeam = window.SESSION && SESSION.b_team ? String(SESSION.b_team) : null;
     const plotOf = Object.fromEntries(all.map(p => [String(p.id), p.plot]));
-    const withPlot = list => list.map(p => ({ ...p, plot: p.plot || plotOf[String(p.id)] || null }));
+    const scouted = (getSlice('scoutSummaries') || {}).data || {};
+    const withPlot = list => list.map(p => ({ ...p, plot: p.plot || plotOf[String(p.id)] || null, scout: p.scout || scouted[String(p.id)] || null }));
     if (own) { own.A = withPlot(own.A || []); own.B = withPlot(own.B || []); }
     const ctxA = teamContext(own && own.A && own.A.length ? own.A : firstTeamOnly(all));
     if (!ctxA) return null;
@@ -3188,7 +3203,7 @@
       const score = j.now.gain + nextWeight * j.next.gain;
       return { id: c.id, name: c.name, age: c.age, fp: c.fp, nat: c.nat || null, r5: Number(Number(c._r5).toFixed(1)),
         routine: c.routine != null ? Number(Number(c.routine).toFixed(1)) : null, asi: c.asi != null ? Number(c.asi) : null, wage: c.wage || null,
-        price, minBid: minPrice(c), ends: c.ends || null, estValue: sta, fair: fairPrice(c), maxValue: c.asi != null && ageMonths ? calcMaxSellPrice(Number(c.asi), ageMonths, sta) : null,
+        price, minBid: minPrice(c), ends: c.ends || null, estValue: sta, fair: fairPrice(c), scout: c.scout || null, maxValue: c.asi != null && ageMonths ? calcMaxSellPrice(Number(c.asi), ageMonths, sta) : null,
         gain: Number(j.now.gain.toFixed(1)), gainNext: Number(j.next.gain.toFixed(1)), slot: j.now.slot, replaces: j.now.replaces,
         pace: c.age < 26 ? Math.round(seasonGain(c, c.age, null)) : null, peak: peakProjection(c),
         score: Number(score.toFixed(1)), perM: score / Math.max(0.1, price / 1e6), steal: sta != null && minPrice(c) < sta * 0.85 && !!c.ends && c.ends - now() < 3600e3 };
@@ -4037,6 +4052,17 @@
     setSlice('transferSeen', store);
     senior = buildSeniorShortlist(prefs).ranked; youth = buildYouthShortlist().ranked;
     buildBuyLists();
+    // Read any scout reports on the listed candidates, then rank again with them.
+    const listed = new Set();
+    const lb = (getSlice('marketBuys') || {}).data;
+    ['A', 'B'].forEach(t => lb && lb[t] && ['best', 'value'].forEach(k => lb[t][k].forEach(r => listed.add(String(r.id)))));
+    let read = 0;
+    for (const id of listed) {
+      onProgress && onProgress(`Reading scout reports ${++read}/${listed.size}…`);
+      try { const sm = scoutSummary(await scoutInfo(id)); if (store[id]) store[id].scout = sm; } catch (e) { console.warn('TM Advisor: scout report', id, e); }
+      await sleep(120);
+    }
+    if (listed.size) { setSlice('transferSeen', store); buildBuyLists(); }
     const summary = { t: now(), searches: searches.length, listings, unique: Object.keys(store).length, seniors: senior.filter(p => p._xi).length, youth: youth.length, foreign: !!foreign };
     setSlice('marketScan', summary);
     return summary;
@@ -4397,6 +4423,31 @@
   const SCOUT_REPORT_FRESH_MS = 8 * 7 * 864e5;
   const SCOUT_COLS = ['sen', 'yth', 'phy', 'tac', 'tec', 'dev', 'psy'];
   const SCOUT_BUDGET_SHARE = 0.05; // heuristic: sign-on fee + 26 weeks' wage within 5% of cash
+  // A player's scout reports, reduced to what a projection can use. Reliability and the peak
+  // sums are "TM - Players Scout" v9's: potential only from Yth (age < 20) or Sen (20+) ≥ 19 with
+  // Dev ≥ 19; development/bloom from Dev ≥ 19; each peak from that skill ≥ 19.
+  const SCOUT_RELIABLE = 19;
+  const PEAK_SUMS = { out: { phy: [64, 70, 74, 80], tac: [64, 70, 74, 80], tec: [96, 105, 111, 120] }, gk: { phy: [64, 70, 74, 80], tac: [50, 55, 60], tec: [68, 74, 80] } };
+  // Development left after the report (heuristic multipliers on projected growth).
+  const DEV_LEFT = { 'Mostly ahead': 1.2, 'Middle': 1, 'Mostly done': 0.5, 'Done': 0.1 };
+  function scoutSummary(info) {
+    const reports = Object.values((info && info.reports) || {}).filter(r => r && String(r.scoutid) !== '0');
+    if (!reports.length) return null;
+    const scouts = (info && info.scouts) || {};
+    const ok = (r, k) => { const sc = scouts[r.scoutid] || Object.values(scouts).find(x => String(x.id) === String(r.scoutid)); return sc && Number(sc[k]) >= SCOUT_RELIABLE; };
+    const out = { done: null };
+    reports.sort((a, b) => new Date(b.done) - new Date(a.done)).forEach(r => {
+      out.done = out.done || r.done;
+      const age = Number(r.report_age);
+      if (out.potential == null && ok(r, 'development') && ok(r, age < 20 ? 'youths' : 'seniors')) { out.potential = Number(r.old_pot); out.potRec = Number(r.potential) / 2; }
+      if (out.dev == null && ok(r, 'development') && r.dev_status) { out.dev = String(r.dev_status).trim(); out.bloom = r.bloom_status_txt ? String(r.bloom_status_txt).trim() : null; }
+      [['phy', 'physical', 'peak_phy_txt'], ['tac', 'tactical', 'peak_tac_txt'], ['tec', 'technical', 'peak_tec_txt']].forEach(([k, sk, f]) => {
+        const lvl = r[f] && (String(r[f]).match(/\((\d)\/4\)/) || [])[1];
+        if (lvl && (out.peaks || {})[k] == null && ok(r, sk)) (out.peaks = out.peaks || {})[k] = Number(lvl);
+      });
+    });
+    return out.potential != null || out.dev || out.peaks ? out : null;
+  }
   async function scoutInfo(playerId) {
     return JSON.parse(await tmPost('/ajax/players_get_info.ajax.php', { player_id: playerId, type: 'scout', show_non_pro_graphs: true }));
   }
@@ -4487,16 +4538,28 @@
     const roleOf = sc => { const row = mine.find(m => m.name === `${sc.name} ${sc.surname}`.trim()); return row ? scoutRole(row) : null; };
     const free = scouts.filter(sc => !sc.away);
     if (!free.length) return { ok: true, text: lines.concat(`all ${scouts.length} scout(s) out (${scouts.map(sc => sc.returns || 'away').join(', ')})`).join('; ') };
+    const summaries = (getSlice('scoutSummaries') || {}).data || {};
     const fresh = async p => {
       await sleep(120);
-      const reports = Object.values(((await scoutInfo(p.id)) || {}).reports || {});
+      const inf = await scoutInfo(p.id);
+      const sm = scoutSummary(inf);
+      if (sm) summaries[String(p.id)] = sm;
+      const reports = Object.values((inf || {}).reports || {});
       return reports.some(r => String(r.scoutid) !== '0' && r.done && now() - new Date(r.done).getTime() < SCOUT_REPORT_FRESH_MS);
     };
     const all = squadA.concat(squadB).sort((x, y) => (Number(x.age) || 99) - (Number(y.age) || 99));
+    // Before you bid: the best transfer candidates without a report, whose auction runs long
+    // enough for the scout to come back (heuristic: over 2 days left).
+    const buys = (getSlice('marketBuys') || {}).data;
+    const targets = [];
+    ['A', 'B'].forEach(t => buys && buys[t] && buys[t].best.slice(0, 3).concat(buys[t].value.slice(0, 2)).forEach(r => {
+      if (!r.scout && r.ends && r.ends - now() > 2 * 864e5 && !targets.some(x => x.id === r.id)) targets.push({ id: r.id, name: r.name, age: r.age, target: true });
+    }));
     const taken = new Set();
     for (const sc of free) {
       const role = roleOf(sc);
-      const pool = all.filter(p => !taken.has(String(p.id)) && (role === 'senior' ? Number(p.age) >= 20 : role === 'youth' ? Number(p.age) <= 19 : Number(p.age) <= RESERVE_MAX_AGE));
+      const fits = p => role === 'senior' ? Number(p.age) >= 20 : role === 'youth' ? Number(p.age) < 20 : Number(p.age) <= RESERVE_MAX_AGE;
+      const pool = targets.filter(p => !taken.has(String(p.id)) && fits(p)).concat(all.filter(p => !taken.has(String(p.id)) && fits(p)));
       let target = null;
       for (const p of pool) { if (!(await fresh(p))) { target = p; break; } }
       if (!target) { lines.push(`${sc.name} ${sc.surname}: everyone in range has a recent report`); continue; }
@@ -4504,8 +4567,9 @@
       if (dryRun) { lines.push(`would send ${sc.name} ${sc.surname} to ${target.name}`); continue; }
       await sleep(200);
       await tmPost('/ajax/players_get_info.ajax.php', { player_id: target.id, type: 'scout', scout_id: sc.id, show_non_pro_graphs: true });
-      lines.push(`sent ${sc.name} ${sc.surname}${role ? ` (${role})` : ''} to ${target.name}`);
+      lines.push(`sent ${sc.name} ${sc.surname}${role ? ` (${role})` : ''} to ${target.name}${target.target ? ' (transfer target)' : ''}`);
     }
+    setSlice('scoutSummaries', summaries);
     return { ok: true, text: lines.join('; ') };
   }
 
@@ -5562,6 +5626,7 @@
       <div class="tma-buy">
         <div class="tma-row"><span><a href="${playerLink(r)}" target="_blank" style="color:#79a8d6;text-decoration:none;font-weight:600;">${esc(r.name)} ↗</a>${r.steal ? ' <span class="tma-badge" title="Ends within the hour at a bid below his Sell-to-Agent price — you could sell him straight back to the agent for more">steal</span>' : ''}${natBadge(r)}</span><span class="tma-goodval" title="What he adds to that XI now → in a year">+${r.gain.toFixed(1)} → +${r.gainNext.toFixed(1)}</span></div>
         <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.routine != null ? ' · Rou ' + r.routine.toFixed(1) : ''}${r.pace ? ' · ~' + r.pace + ' skill pts next season' : ''}${r.peak != null ? ' · R5 at ' + PEAK_AGE + ' ≈ ' + r.peak.toFixed(1) : ''}</div>
+        ${r.scout ? `<div class="tma-mini">🔍 Scouted${r.scout.potential != null ? ' · potential ' + r.scout.potential + '/20' : ''}${r.scout.dev ? ' · development ' + esc(r.scout.dev) : ''}${r.scout.peaks ? ' · peaks ' + ['phy', 'tac', 'tec'].map(k => (r.scout.peaks[k] || '?')).join('/') + ' (phy/tac/tec of 4)' : ''}</div>` : ''}
         <div class="tma-mini">Starts at <b>${esc(String(r.slot || '').toUpperCase())}</b>${r.replaces ? ' for ' + esc(r.replaces) : ''} · next bid ${fmtMoney(r.minBid)}${r.price > r.minBid ? ' · likely <b>' + fmtMoney(r.price) + '</b>' : ''}${r.fair ? ' · market rate ' + fmtMoney(Math.round(r.fair)) : ''}${r.ends ? ' · ends ' + endsIn(r.ends) : ''}${r.wage ? ' · wage ' + fmtMoney(r.wage) + '/wk' : ''}</div>
       </div>`;
     const bucket = (title, list, open, empty) => `
