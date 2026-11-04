@@ -70,12 +70,10 @@ Adds **Routine**, **Skill Index**, and **R5** columns directly to the game's own
 
 ### 🔍 Scouting & Transfers
 
-- **Market Scan** — one click searches the whole transfer list itself (every position, ages 18–27, foreign players included by default — the home market alone is tiny), checks routine for the top candidates, and ranks the **top seniors** and **top youth** below. Read-only: it never bids.
-- **Youth Finder** — ranks youngsters (18–20, the youngest the market lists) by **development pace**: skill points gained per year since 16, read from their SI with the same formula the R5 engine uses — boosted when a scout report shows growth headroom. Flags any who'd already start for you.
-- **Senior Targets** — every candidate is judged by what he does to **your best XI**: the script re-picks your optimal XI with him added and shows the gain, the slot he'd take and who he'd replace — so position, your depth there and TM's out-of-position penalty all count.
-- **Market-value verdict** — for every shortlisted player, compares the live bid against the game's Sell-to-Agent / Max Sell Price to flag it **Underpriced / Fair / Overpriced** at a glance.
-- **Bloom-phase estimate** — grades each scout report's youth by bloom phase (from age + potential headroom) so you know who to train hard before it ends.
-- **Spending Guidance** — calculates a recommended transfer budget based on your cash, wage bill, and a 12-week reserve buffer.
+- **One budget, one scan** — the Scouting tab (on the transfer pages) shows your cash, the wage reserve it keeps back (12 weeks), your **best-buy budget** (half of what's left) and your **budget-buy cap** (10% of that). One set of filters: max age (27 by default — TM's decline starts at 28) and foreign players. Opening the tab scans the whole transfer list by itself when the last scan is over 12 hours old. Read-only: it never bids.
+- **Your XI, position by position** — every starter, weakest first, with the biggest upgrade on the market for that exact slot (best buy, and a cheaper option when there is one).
+- **Best buys / Budget buys** — two collapsible lists ranked by what each player adds to **your best XI today** (the script re-picks your optimal XI with him added — position, depth, TM's out-of-position penalty and routine sharing all count). Each line shows where he'd start, who he'd replace, his bid, his Sell-to-Agent price and wage; youngsters show how fast they're growing. A **steal** badge marks a bid below his Sell-to-Agent price (you could sell him straight back for more). Bids are current — an auction can still go higher.
+- **Youth prospects** — youngsters (18–20) ranked by **development pace** (skill points per year since 16, from their SI) — boosted when a scout report shows growth headroom. Collapsible, like the scouts' potential board.
 - **Valuation** — shows exact Sell-to-Agent and Max Sell Price for any player with known skills.
 
 ### 🏆 League Squad Strength
