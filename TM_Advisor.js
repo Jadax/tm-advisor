@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.24.1
+// @version      3.25.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -872,6 +872,7 @@
       // players_get_select sends `player_name` (no `name`) — reading only name/surname is why
       // every scanned opponent showed as "Unknown".
       id: raw.id, name: raw.player_name || raw.name || raw.lastname || raw.surname || 'Unknown', fp: raw.fp,
+      nat: raw.country || raw.player_country || null,
       ban: raw.ban != null ? String(raw.ban) : '0', inj: raw.injury && String(raw.injury) !== '0' ? raw.injury : null,
       // age isn't always present in this endpoint; capture it when it is so the Youth
       // Finder can age-filter players from ANY club we scan, not just our own squad.
@@ -2153,7 +2154,23 @@
   }
 
   const NO_FIT = -1e6;
+  // TM's tactics page refuses a 6th foreigner across XI + bench (js/tactics_v2.js: `foreigners
+  // >= 5` disables the drop; foreign = the player's show_flag, i.e. not your club's nation).
+  const MAX_FOREIGN = 5;
+  const isForeign = p => !!p && (p.foreign === true || (!!p.nat && !!MY_COUNTRY && String(p.nat).toLowerCase() !== MY_COUNTRY));
   function pickBestXI(players, formationKey, boost) {
+    let xi = pickBestXIUnchecked(players, formationKey, boost);
+    // Over the cap: drop the weakest foreign starter from the pool and pick again.
+    const out = new Set();
+    for (let guard = 0; guard < 11; guard++) {
+      const f = xi.lineup.filter(l => isForeign(l.player));
+      if (f.length <= MAX_FOREIGN) break;
+      out.add(f.sort((a, b) => a.effectiveR5 - b.effectiveR5)[0].player);
+      xi = pickBestXIUnchecked(players.filter(p => !out.has(p)), formationKey, boost);
+    }
+    return xi;
+  }
+  function pickBestXIUnchecked(players, formationKey, boost) {
     const keys = FORMATIONS[formationKey].split(' ');
     const score = keys.map(k => players.map(p => { const v = slotRating(p, k) * (boost ? boost(p) : 1); return isFinite(v) ? v : NO_FIT; }));
     while (score[0].length < keys.length) score.forEach(r => r.push(NO_FIT)); // fewer players than slots
@@ -2219,17 +2236,18 @@
     { key: 'sub2', role: 'DEF', slots: ['dcl', 'dl', 'dr'], fits: f => f.lines.has('D') },
     { key: 'sub1', role: 'GK', slots: ['gk'], fits: f => f.lines.has('GK') },
   ];
-  function pickBench(remainingPlayers) {
+  function pickBench(remainingPlayers, foreignLeft) {
     const used = new Set();
+    let left = foreignLeft != null ? foreignLeft : MAX_FOREIGN;
     const named = BENCH_ROLES.map(r => {
       const rate = p => Math.max(...r.slots.map(k => slotRating(p, k)));
-      const free = remainingPlayers.filter(p => !used.has(p.id));
+      const free = remainingPlayers.filter(p => !used.has(p.id) && (left > 0 || !isForeign(p)));
       const natural = free.filter(p => r.fits(fpLinesSides(p.fp)));
       // No natural option left: still fill it (an empty bench slot is a wasted option) with the
       // best rated cover, ties going to the better player overall.
       const pool = natural.length ? natural : free;
       const player = pool.sort((a, b) => (rate(b) - rate(a)) || ((Number(ensureR5(b)) || 0) - (Number(ensureR5(a)) || 0)))[0] || null;
-      if (player) used.add(player.id);
+      if (player) { used.add(player.id); if (isForeign(player)) left--; }
       return { key: r.key, role: r.role, player, rating: player ? rate(player) : 0 };
     });
     const extras = remainingPlayers.filter(p => !used.has(p.id)).sort((a, b) => (b._r5 || 0) - (a._r5 || 0)).slice(0, 2);
@@ -2491,7 +2509,7 @@
     const settings = recommendTacticSettings(best, opponent, scouting, expected, opts);
     const starters = best.lineup.filter(l => l.player).map(l => l.player);
     const ids = new Set(starters.map(p => p.id));
-    const bench = pickBench(players.filter(p => !ids.has(p.id)));
+    const bench = pickBench(players.filter(p => !ids.has(p.id)), MAX_FOREIGN - starters.filter(isForeign).length);
     const roles = pickSquadRoles(starters);
     const ctx = matchContext(settings, expected, scouting);
     return { players, best, settings, bench, roles, ctx, condOrders: buildCondOrders(best, bench, settings.mentality, ctx) };
@@ -2821,13 +2839,9 @@
    *  Same pool (transfer list you've browsed, scanned clubs, scouted
    *  opponents), same R5 engine, no separate valuation invented.
    *
-   *  NOTE ON THE "5 FOREIGN PLAYERS" RULE: we searched the official TM user
-   *  guide (all 10 PDF chapters) and every community userscript in TM Guide/
-   *  for a hard non-national squad/matchday cap and found NONE — no
-   *  wiki page or working script enforces or even mentions one. Nationality
-   *  below is therefore shown as an informational badge only (home nation vs.
-   *  foreign), never used to filter or exclude a target. Verify any roster
-   *  rule directly in-game (Club > Squad rules) before treating it as fact.
+   *  FOREIGN PLAYERS: TM's tactics page allows at most 5 foreigners across XI +
+   *  bench (js/tactics_v2.js) — enforced by pickBestXI/pickBench (MAX_FOREIGN),
+   *  so a foreign signing only shows a gain while there's room for him.
    * ============================================================ */
   // maxAge default of 27 is straight from TM's own user guide (Player Development): base
   // training tapers to its TI-1 floor by 26-27, and "from age 28 and onwards player skills
@@ -2998,25 +3012,84 @@
   const BUY_LIST_LEN = 8;
   const BUY_VALUE_MIN_SCORE = 8; // heuristic: value buys must still be a real upgrade, not +1 for nothing
   const PROJECT_YEARS = 1;
-  // Share of a player's career-average pace (youthPace) he keeps at each age. Own heuristic,
-  // shaped by TM's guide (Player Development): training gains taper to the TI-1 floor by 26-27
-  // and skills deteriorate from 28.
-  const paceKept = age => age < 20 ? 1 : age < 22 ? 0.8 : age < 24 ? 0.5 : age < 26 ? 0.3 : age < 28 ? 0.15 : 0;
+  // Growth projection, from YOUR club's measured training (so it reflects your training
+  // ground, academy and custom plans): players_ar `plot` is each player's weekly TI; TM's
+  // guide (Player Development): "one point of TI typically equals 0.1 skill point"; a season —
+  // one year of age — is 12 training weeks ("TM - Squad Viewer": SEASON_DAYS = 84).
+  // Talent scales it: TI is set by hidden talent and age (same guide), and talent shows in a
+  // player's career pace (youthPace) relative to your own players of the same age.
+  const TI_SKILL = 0.1, SEASON_WEEKS = 12;
+  const GROWTH_BANDS = [[15, 18], [18, 20], [20, 22], [22, 24], [24, 26], [26, 28], [28, 30], [30, 99]];
+  // Fallback TI per band (own heuristic) shaped by the same guide — base TI doubled 15-18,
+  // dealt out to 26, TI 1 at 27, decline from 28 — used where your squad has nobody that age.
+  const GROWTH_FALLBACK_TI = [20, 12, 6, 4, 3, 2, 1, -2];
+  const bandOf = age => GROWTH_BANDS.findIndex(([lo, hi]) => age >= lo && age < hi);
+  const median = xs => { const v = xs.filter(x => x != null && isFinite(x)).sort((a, b) => a - b); return v.length ? v[Math.floor(v.length / 2)] : null; };
+  const recentTi = p => { const v = (p.plot || []).map(Number).filter(x => !isNaN(x)).slice(-6); return v.length >= 3 ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+  let _growth = null, _growthKey = null;
+  function clubGrowth() {
+    const sl = getSlice('players');
+    const key = sl ? sl.t : null;
+    if (_growth && _growthKey === key) return _growth;
+    const players = (sl && sl.data) || [];
+    const bands = GROWTH_BANDS.map((_, i) => {
+      // Fillers (SI < 1000 veterans parked in the reserves) say nothing about training.
+      const ps = players.filter(p => bandOf(Number(p.age)) === i && Number(String(p.asi).replace(/,/g, '')) >= 1000 && recentTi(p) != null);
+      const pace = median(ps.map(p => { const y = youthPace(p); return y && y.pace; }));
+      return { n: ps.length, ti: ps.length >= 2 ? median(ps.map(recentTi)) : null, pace };
+    });
+    _growth = { bands }; _growthKey = key;
+    return _growth;
+  }
+  // Skill points a player should gain over the coming season at `age`.
+  function seasonGain(p, age, own) {
+    const g = clubGrowth(), i = bandOf(age), band = g.bands[i] || {};
+    const ti = own != null ? own : band.ti != null ? band.ti : GROWTH_FALLBACK_TI[i] || 0;
+    let talent = 1;
+    if (own == null && ti > 0 && band.pace) { const y = youthPace(p); if (y && y.pace > 0) talent = Math.max(0.5, Math.min(2, y.pace / band.pace)); }
+    return ti * TI_SKILL * SEASON_WEEKS * talent;
+  }
+  // TM guide, "Allocation of TI" (hill-shaped): per TI a skill rises 0.1 (+50% chance of
+  // another 0.1) below 5, 0.1 at 5-14.9, 0.1 half the time at 15-17.9, 40% of the time at 18-20.
+  const trainEff = v => v < 5 ? 1.5 : v < 15 ? 1 : v < 18 ? 0.5 : 0.4;
+  function addTrained(v, pts) {
+    let x = v, rem = pts;
+    while (rem > 1e-6 && x < 20) { const step = Math.min(rem, 0.25); x += step * trainEff(x); rem -= step; }
+    return Math.min(20, x);
+  }
+  const SKILL_KEYS_GK = ['str', 'sta', 'pac', 'han', 'one', 'ref', 'ari', 'jum', 'com', 'kic', 'thr'];
+  const SKILL_KEYS_OUT = ['str', 'sta', 'pac', 'mar', 'tac', 'wor', 'pos', 'pas', 'cro', 'tec', 'hea', 'fin', 'lon', 'set'];
+  // Projects a player `years` seasons ahead; your own players use their own measured TI for the
+  // first season. Points spread evenly over his not-yet-20 skills (TM's real split depends on
+  // hidden peaks — an approximation), SI follows from the new skill sum.
   function projectPlayer(p, years) {
-    const pace = youthPace(p), age = Number(p.age) || 0;
-    if (!pace || !p.skills || !p.asi) return p;
-    const gain = pace.pace * paceKept(age) * years;
-    if (gain <= 0) return { ...p, age: age + years };
-    const keys = Object.keys(p.skills).filter(k => Number(p.skills[k]) < 20);
-    if (!keys.length) return { ...p, age: age + years };
-    const skills = { ...p.skills };
-    keys.forEach(k => { skills[k] = Math.min(20, Number(skills[k]) + gain / keys.length); });
-    const isGK = bucketFor(p.fp) === 'GK', w = isGK ? 48717927500 : 263533760000;
-    const asi = Math.round(Math.pow(pace.sum + gain, 7) / w); // inverse of skillSumFromSI
-    const out = { ...p, skills, asi, age: age + years };
+    const age0 = Number(p.age) || 0, isGK = bucketFor(p.fp) === 'GK';
+    if (!p.skills || !p.asi) return p;
+    const sum0 = skillSumFromSI(Number(String(p.asi).replace(/,/g, '')), isGK);
+    if (!sum0) return p;
+    let gain = 0;
+    for (let y = 0; y < years; y++) gain += seasonGain(p, age0 + y, y === 0 ? recentTi(p) : null);
+    const out = { ...p, age: age0 + years };
+    if (Math.abs(gain) < 0.05) return out;
+    const keys = (isGK ? SKILL_KEYS_GK : SKILL_KEYS_OUT).filter(k => p.skills[k] != null && (gain > 0 ? Number(p.skills[k]) < 20 : true));
+    if (!keys.length) return out;
+    out.skills = { ...p.skills };
+    let applied = 0;
+    keys.forEach(k => { const v0 = Number(out.skills[k]); const v1 = gain > 0 ? addTrained(v0, gain / keys.length) : Math.max(1, v0 + gain / keys.length); out.skills[k] = v1; applied += v1 - v0; });
+    const w = isGK ? 48717927500 : 263533760000;
+    out.asi = Math.round(Math.pow(Math.max(1, sum0 + applied), 7) / w); // inverse of skillSumFromSI
+    out.plot = null; // measured TI belongs to today's player, not the projected one
     delete out._r5; delete out._slotR5;
     ensureR5(out);
     return out;
+  }
+  // R5 at his last pre-decline age (27: TI drops to 1 then, decline from 28 — TM guide).
+  const PEAK_AGE = 27;
+  function peakProjection(p) {
+    const age = Number(p.age) || 0;
+    if (age >= PEAK_AGE) return null;
+    const q = projectPlayer({ ...p }, Math.max(1, Math.round(PEAK_AGE - age)));
+    return q && q._r5 != null ? Number(Number(q._r5).toFixed(1)) : null;
   }
   function teamContext(squad) {
     if (!squad || squad.length < 11) return null;
@@ -3032,6 +3105,9 @@
     const sl = getSlice('players');
     const all = sl && sl.data ? sl.data : [];
     const bTeam = window.SESSION && SESSION.b_team ? String(SESSION.b_team) : null;
+    const plotOf = Object.fromEntries(all.map(p => [String(p.id), p.plot]));
+    const withPlot = list => list.map(p => ({ ...p, plot: p.plot || plotOf[String(p.id)] || null }));
+    if (own) { own.A = withPlot(own.A || []); own.B = withPlot(own.B || []); }
     const ctxA = teamContext(own && own.A && own.A.length ? own.A : firstTeamOnly(all));
     if (!ctxA) return null;
     const ctxB = own && own.B && own.B.length ? teamContext(own.B) : bTeam ? teamContext(all.filter(p => String(p.club) === bTeam)) : null;
@@ -3050,13 +3126,12 @@
     };
     const row = (c, j, nextWeight) => {
       const price = likelyPrice(c), sta = estimateBankPrice(c), ageMonths = ageMonthsOf(c);
-      const pace = youthPace(c);
       const score = j.now.gain + nextWeight * j.next.gain;
       return { id: c.id, name: c.name, age: c.age, fp: c.fp, nat: c.nat || null, r5: Number(Number(c._r5).toFixed(1)),
         routine: c.routine != null ? Number(Number(c.routine).toFixed(1)) : null, asi: c.asi != null ? Number(c.asi) : null, wage: c.wage || null,
         price, minBid: minPrice(c), ends: c.ends || null, estValue: sta, maxValue: c.asi != null && ageMonths ? calcMaxSellPrice(Number(c.asi), ageMonths, sta) : null,
         gain: Number(j.now.gain.toFixed(1)), gainNext: Number(j.next.gain.toFixed(1)), slot: j.now.slot, replaces: j.now.replaces,
-        pace: pace && c.age < 24 ? Math.round(pace.pace * paceKept(c.age)) : null,
+        pace: c.age < 26 ? Math.round(seasonGain(c, c.age, null)) : null, peak: peakProjection(c),
         score: Number(score.toFixed(1)), perM: score / Math.max(0.1, price / 1e6), steal: sta != null && minPrice(c) < sta * 0.85 && !!c.ends && c.ends - now() < 3600e3 };
     };
     const lists = (rows, ctx) => {
@@ -3068,15 +3143,18 @@
         const val = [...here].sort((x, y) => y.perM - x.perM)[0] || null;
         return { slot: l.slot, name: l.player.name, r5: Number(l.effectiveR5.toFixed(1)), best: top, value: val && (!top || val.id !== top.id) ? val : null };
       });
-      return { best, value, bySlot, upgrades: rows.length };
+      return { best, value, bySlot, upgrades: rows.length, foreignXi: ctx.now.base.lineup.filter(l => isForeign(l.player)).length };
     };
     const rowsA = [], rowsB = [];
+    // Reserve buys are for the future: by 27 he must reach at least your weakest first-team
+    // starter today, or he's only ever a reserve.
+    const firstTeamBar = Math.min(...ctxA.now.base.lineup.filter(l => l.player).map(l => l.effectiveR5));
     pool.forEach(c => {
       const ja = judge(c, ctxA);
       if (ja) { rowsA.push(row(c, ja, 1)); return; } // first-team material isn't a reserve signing
-      if (ctxB && c.age < RESERVE_MAX_AGE + 1) { const jb = judge(c, ctxB); if (jb) rowsB.push(row(c, jb, 2)); }
+      if (ctxB && c.age < RESERVE_MAX_AGE + 1) { const jb = judge(c, ctxB); if (jb) { const r = row(c, jb, 2); if (r.peak != null && r.peak >= firstTeamBar) rowsB.push(r); } }
     });
-    const out = { cap, maxAge, considered: pool.length, A: lists(rowsA, ctxA), B: ctxB ? lists(rowsB, ctxB) : null };
+    const out = { cap, maxAge, considered: pool.length, firstTeamBar: Number(firstTeamBar.toFixed(1)), A: lists(rowsA, ctxA), B: ctxB ? lists(rowsB, ctxB) : null };
     setSlice('marketBuys', out);
     return out;
   }
@@ -3220,6 +3298,7 @@
         asi: Number(String(p.skill_index).replace(/,/g, '')), routine: Number(p.routine) || 0,
         ban: p.banned ? '1' : '0', inj: String(p.injury) === '0' ? null : p.injury,
         banRisk: /yellow_card/.test(p.status_no_check || ''), rec: Number(p.rec_sort) || 0, skills, plot: [],
+        nat: p.country || null, foreign: !!p.show_flag,
       };
     });
   }
@@ -3481,6 +3560,7 @@
     };
     try {
       say('Reading the next fixtures…');
+      await refreshOwnPlayers().catch(e => console.warn('TM Advisor: players', e));
       const homeDoc = await fetchDoc('/home/');
       measureTmOffset(homeDoc); // fresh render = an exact clock reading
       const home = parseHome(homeDoc);
@@ -3830,6 +3910,15 @@
       time: x.time, nat: x.nat || null, rec: Number(x.rec) / 2 || null, skills, _seen: now(), _scan: true,
     };
   }
+  // The Players page carries every player's weekly TI (plot) — read it on each run so the
+  // training history and growth curve don't depend on you opening that page.
+  async function refreshOwnPlayers() {
+    const data = parsePlayers(await fetchDoc('/players/'));
+    if (!data.length) return null;
+    setSlice('players', data);
+    recordSquadSnapshot(data);
+    return data;
+  }
   async function marketScan(onProgress) {
     const prefs = loadShortlistPrefs('senior');
     // Judge against today's squads and wage bill, read now — not whatever pages happen to be
@@ -3840,6 +3929,7 @@
       if (A.length) setSlice('ownSquads', { A, B });
     } catch (e) { console.warn('TM Advisor: own squads', e); }
     try { setSlice('finances', parseFinances(await fetchDoc('/finances/'))); } catch (e) { console.warn('TM Advisor: finances', e); }
+    try { await refreshOwnPlayers(); } catch (e) { console.warn('TM Advisor: players', e); }
     const foreign = prefs.includeForeign !== false ? 'for/' : '';
     const searches = [];
     MARKET_GROUPS.forEach(g => MARKET_BANDS.forEach(([a, b]) => searches.push(`/${g}/${foreign}amin/${a}/amax/${b}/`)));
@@ -5153,13 +5243,14 @@
       const p = tiOf[pl.id] || {};
       const plot = (p.plot || []).slice(-4).map(Number).filter(v => !isNaN(v));
       const avg = plot.length ? plot.reduce((a, b) => a + b, 0) / plot.length : null;
-      return { ...pl, ti: p.ti, avg, g: recentSkillGain(pl.id, 28) };
+      return { ...pl, ti: p.ti, avg, g: recentSkillGain(pl.id, 28), total: recentSkillGain(pl.id, 3650), r5: p._r5 != null ? Number(p._r5) : null, peak: p.skills ? peakProjection(p) : null };
     }).sort((a, b) => (a.team === b.team ? 0 : a.team === 'A' ? -1 : 1) || ((a.age || 0) - (b.age || 0)));
     return `
       <div class="tma-card">
         <h4>Training progress <span class="tma-badge">${plans.length} players · both teams</span></h4>
-        <div class="tma-mini" style="margin-bottom:6px;">TI this week / 4-week average, skill points gained since ~4 weeks ago (weekly snapshots after Tuesday's training), and the custom plan set for each (groups: str·wor·sta – mar·tac – cro·pac – pas·tec·set – hea·pos – fin·lon).</div>
-        ${rows.map(r => `<div class="tma-row"><span>${r.team === 'B' ? '<span class="tma-badge">res</span> ' : ''}${esc(r.name)} <span class="tma-mini">${r.age ? Math.floor(r.age) : '?'} · ${esc(String(r.slot).toUpperCase())}</span></span><span class="tma-mini" title="${esc(r.why)}">TI ${r.ti != null ? r.ti : '–'}${r.avg != null ? ' / ' + r.avg.toFixed(1) : ''} · ${r.g ? (r.g.gain >= 0 ? '+' : '') + r.g.gain + ' pts / ' + r.g.weeks + 'w' : 'tracking…'} · <b>${r.dots.join('-')}</b></span></div>`).join('')}
+        <div class="tma-mini" style="margin-bottom:6px;">TI this week / 4-week average, skill points gained in ~4 weeks and since tracking began (weekly snapshots after Tuesday's training), R5 now → projected at ${PEAK_AGE} (last age before TM's decline, from your club's own training curve), and the custom plan (groups: str·wor·sta – mar·tac – cro·pac – pas·tec·set – hea·pos – fin·lon).</div>
+        ${(() => { const g = clubGrowth(); const parts = g.bands.map((b, i) => b.ti != null ? `${GROWTH_BANDS[i][0]}${GROWTH_BANDS[i][1] < 99 ? '–' + (GROWTH_BANDS[i][1] - 1) : '+'}: TI ${b.ti.toFixed(1)} (≈${(b.ti * TI_SKILL * SEASON_WEEKS).toFixed(0)} pts/season)` : null).filter(Boolean); return parts.length ? `<div class="tma-mini" style="margin-bottom:6px;">Your club's training by age — ${parts.join(' · ')}</div>` : ''; })()}
+        ${rows.map(r => `<div class="tma-row"><span>${r.team === 'B' ? '<span class="tma-badge">res</span> ' : ''}${esc(r.name)} <span class="tma-mini">${r.age ? Math.floor(r.age) : '?'} · ${esc(String(r.slot).toUpperCase())}</span></span><span class="tma-mini" title="${esc(r.why)}">TI ${r.ti != null ? r.ti : '–'}${r.avg != null ? ' / ' + r.avg.toFixed(1) : ''} · ${r.g ? (r.g.gain >= 0 ? '+' : '') + r.g.gain + ' pts / ' + r.g.weeks + 'w' : 'tracking…'}${r.total && r.total.weeks > (r.g ? r.g.weeks : 0) ? ' (' + (r.total.gain >= 0 ? '+' : '') + r.total.gain + ' / ' + r.total.weeks + 'w)' : ''}${r.r5 != null ? ' · R5 ' + r.r5.toFixed(1) + (r.peak != null ? ' → ' + r.peak.toFixed(1) : '') : ''} · <b>${r.dots.join('-')}</b></span></div>`).join('')}
       </div>`;
   }
 
@@ -5375,7 +5466,7 @@
     const buyRow = r => `
       <div class="tma-buy">
         <div class="tma-row"><span><a href="${playerLink(r)}" target="_blank" style="color:#79a8d6;text-decoration:none;font-weight:600;">${esc(r.name)} ↗</a>${r.steal ? ' <span class="tma-badge" title="Ends within the hour at a bid below his Sell-to-Agent price — you could sell him straight back to the agent for more">steal</span>' : ''}${natBadge(r)}</span><span class="tma-goodval" title="What he adds to that XI now → in a year">+${r.gain.toFixed(1)} → +${r.gainNext.toFixed(1)}</span></div>
-        <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.routine != null ? ' · Rou ' + r.routine.toFixed(1) : ''}${r.pace ? ' · growing ~' + r.pace + ' skill pts/yr' : ''}</div>
+        <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.routine != null ? ' · Rou ' + r.routine.toFixed(1) : ''}${r.pace ? ' · ~' + r.pace + ' skill pts next season' : ''}${r.peak != null ? ' · R5 at ' + PEAK_AGE + ' ≈ ' + r.peak.toFixed(1) : ''}</div>
         <div class="tma-mini">Starts at <b>${esc(String(r.slot || '').toUpperCase())}</b>${r.replaces ? ' for ' + esc(r.replaces) : ''} · next bid ${fmtMoney(r.minBid)}${r.price > r.minBid ? ' · likely <b>' + fmtMoney(r.price) + '</b>' : ''}${r.ends ? ' · ends ' + endsIn(r.ends) : ''}${r.wage ? ' · wage ' + fmtMoney(r.wage) + '/wk' : ''}</div>
       </div>`;
     const bucket = (title, list, open, empty) => `
@@ -5389,7 +5480,7 @@
       </details>` : '';
     const teamSection = (title, t, open, note) => `
       <details class="tma-card" ${open ? 'open' : ''}><summary style="cursor:pointer;"><h4 style="display:inline;">${title} <span class="tma-badge">${t ? t.upgrades : 0} upgrades</span></h4></summary>
-        <div class="tma-mini" style="margin:4px 0;">${note}</div>
+        <div class="tma-mini" style="margin:4px 0;">${note}${t ? ` Foreign players in this XI: <b>${t.foreignXi}/${MAX_FOREIGN}</b> — TM allows ${MAX_FOREIGN} across XI + bench, so a foreign signing only counts while there's room; home-nation players are unlimited.` : ''}</div>
         ${t ? slotMap(t) + bucket('Best buys', t.best, true, 'Nobody on the market is an upgrade now and next year within budget.') + bucket('Value buys', t.value, false, 'No value upgrades right now.') : '<div class="tma-mini">Run a market scan.</div>'}
       </details>`;
     const budget0 = budgetGuidance();
@@ -5408,7 +5499,7 @@
     body.innerHTML = `
       ${scanHtml}
       ${teamSection('First team', buys && buys.A, true, 'Upgrades to your best XI now <b>and</b> in a year (both sides projected). Best = biggest total gain; value = gain per million.')}
-      ${buys && buys.B ? teamSection('Reserves', buys.B, false, `Youths ≤ ${RESERVE_MAX_AGE} who'd improve the reserve XI now and in a year — next year counts double. First-team material is listed above instead.`) : ''}
+      ${buys && buys.B ? teamSection('Reserves', buys.B, false, `Youths ≤ ${RESERVE_MAX_AGE} who'd improve the reserve XI now and in a year (next year counts double) <b>and</b> are projected to reach your weakest first-team starter's R5 (${buys.firstTeamBar != null ? buys.firstTeamBar.toFixed(1) : '?'}) by ${PEAK_AGE}. First-team material is listed above instead.`) : ''}
       <details class="tma-card"><summary style="cursor:pointer;"><h4 style="display:inline;">Youth prospects 🌱 <span class="tma-badge">${shortlist ? shortlist.length : 0}</span></h4></summary>
         <div class="tma-mini" style="margin:4px 0;">Fastest developers on the market: age ≤ ${YOUTH_CRITERIA.maxAge}, Rou ≥ ${YOUTH_CRITERIA.minRoutine}, SI ≥ ${YOUTH_CRITERIA.minASI}, R5 ≥ ${YOUTH_CRITERIA.minR5}. Built by the scan.</div>
         ${shortlistHtml}
