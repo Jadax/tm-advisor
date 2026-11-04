@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.25.0
+// @version      3.25.1
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -4311,7 +4311,8 @@
   /* ============================================================
    *  SECTION 5P — SCOUTING
    *  ------------------------------------------------------------
-   *  Keeps ONE youth scout (20 Yth) and ONE senior scout (20 Sen) — user rule:
+   *  Keeps ONE youth scout (20 Yth AND 20 Dev — development is what a youth
+   *  report is for) and ONE senior scout (20 Sen) — user rule:
    *  anything less isn't worth the wage, and a scout with 20 in both is a waste
    *  (one player at a time, inflated wage). The guide: Yth judges players ≤19,
    *  Sen 20+, Dev the bloom, Phy/Tac/Tec the specialist peaks, Psy the hidden
@@ -4345,7 +4346,10 @@
     });
     return out;
   }
-  const scoutRole = s => s.yth >= SCOUT_MIN && s.sen < SCOUT_MIN ? 'youth' : s.sen >= SCOUT_MIN && s.yth < SCOUT_MIN ? 'senior' : s.sen >= SCOUT_MIN ? 'both' : null;
+  // A youth scout needs 20 Dev as well (user rule): the guide's Dev skill is what judges bloom
+  // and development, the whole point of scouting a youth.
+  const youthCapable = s => s.yth >= SCOUT_MIN && s.dev >= SCOUT_MIN;
+  const scoutRole = s => youthCapable(s) && s.sen < SCOUT_MIN ? 'youth' : s.sen >= SCOUT_MIN && !youthCapable(s) ? 'senior' : s.sen >= SCOUT_MIN ? 'both' : null;
   // Heuristic ranking after the must-have 20: youths need the bloom read (Dev — the guide's own
   // tip is 19-20 in Yth AND Dev), seniors the specialist peaks.
   // "TM - Players Scout" v9 trusts a report's potential only from Sen/Yth ≥19 AND Dev ≥19, so Dev
@@ -4353,7 +4357,7 @@
   const scoutRank = (s, role) => role === 'youth' ? s.dev * 4 + s.psy * 2 + s.phy + s.tac + s.tec : s.dev * 3 + (s.phy + s.tac + s.tec) * 1.5 + s.psy * 2;
   function bestScoutFor(list, role) {
     const key = role === 'youth' ? 'yth' : 'sen';
-    const ok = list.filter(s => s[key] >= SCOUT_MIN);
+    const ok = list.filter(s => role === 'youth' ? youthCapable(s) : s[key] >= SCOUT_MIN);
     const single = ok.filter(s => scoutRole(s) === role);
     return (single.length ? single : ok).sort((x, y) => scoutRank(y, role) - scoutRank(x, role) || x.wage - y.wage)[0] || null;
   }
@@ -4366,7 +4370,7 @@
     const lines = [];
     for (const role of need) {
       const s = bestScoutFor(market, role);
-      if (!s) { lines.push(`no ${role} scout with 20 ${role === 'youth' ? 'Yth' : 'Sen'} on the hire list yet`); continue; }
+      if (!s) { lines.push(`no ${role} scout with ${role === 'youth' ? '20 Yth + 20 Dev' : '20 Sen'} on the hire list yet`); continue; }
       const stats = SCOUT_COLS.map(k => k[0].toUpperCase() + k.slice(1) + ' ' + s[k]).join('/');
       if (!s.id) { lines.push(`${s.name} qualifies as ${role} scout but has no Hire button`); continue; }
       if (s.fee + 26 * s.wage > SCOUT_BUDGET_SHARE * cash) { lines.push(`${s.name} (${role}, ${stats}) is too dear: ${fmtMoney(s.fee)} fee + ${fmtMoney(s.wage)}/wk`); continue; }
