@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.26.0
+// @version      3.27.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -1861,6 +1861,12 @@
           }
         }
         hookMatchAjax(); // catch match_data once it loads via XHR
+        // Before kickoff the page never loads the report, but TM has already played the match
+        // (it simulates ahead) — read it ourselves, as "Match stats and actions 51 minutes before
+        // match" does, and show the result.
+        const mid = (path.match(/\/matches\/(\d+)/) || [])[1];
+        if (mid) fetchMatchJson(mid).then(m => { if (m && m.report && Object.keys(m.report).length) { cacheMatchSummary(m); showMatchResultCard(m, mid); } enhanceMatchPageRatings(m); })
+          .catch(e => console.warn('TM Advisor: match report', e));
       }
     } catch (e) { console.error('TM Advisor auto-capture error', e); }
   }
@@ -1960,6 +1966,48 @@
         anchor.insertBefore(box, anchor.firstChild);
       }
     } catch (e) { console.warn('TM Advisor: match-page ratings overlay failed', e); _matchRatingsDone = false; }
+  }
+
+  // Full result on the match page: score, stats, every event with its minute and player
+  // (goals, cards, injuries, subs, mentality changes) and how each side built its attacks.
+  function showMatchResultCard(match, matchId) {
+    if (document.getElementById('tma-match-result')) return;
+    const a = analyseMatchReport(match);
+    const H = match.club.home, A = match.club.away, homeId = String(H.id);
+    const lineup = match.lineup || {};
+    const nameOf = pid => { const x = (lineup.home && lineup.home[pid]) || (lineup.away && lineup.away[pid]); return x ? x.name : 'Player ' + pid; };
+    const sideOf = pid => lineup.home && lineup.home[pid] ? 'home' : 'away';
+    const extra = [];
+    Object.keys(match.report).forEach(min => (match.report[min] || []).forEach(evt => (evt && evt.parameters || []).forEach(pr => {
+      if (pr.sub) extra.push({ minute: Number(min), type: 'sub', side: sideOf(pr.sub.player_in), player: `${nameOf(pr.sub.player_in)} on for ${nameOf(pr.sub.player_out)}` });
+      if (pr.mentality_change) extra.push({ minute: Number(min), type: 'ment', side: String(pr.mentality_change.team) === homeId ? 'home' : 'away', player: 'Mentality → ' + (MENTALITY[Number(pr.mentality_change.mentality)] || pr.mentality_change.mentality) });
+    })));
+    const events = a.timeline.concat(extra).sort((x, y) => x.minute - y.minute);
+    const icon = { goal: '⚽', yellow: '🟨', red: '🟥', yellow_red: '🟨🟥', injury: '✚', sub: '🔄', ment: '🧭' };
+    const styles = { home: {}, away: {} };
+    concededByStyle(match, String(A.id), styles.home); // attacks by home = conceded by away
+    concededByStyle(match, homeId, styles.away);
+    const styleLine = side => Object.entries(styles[side]).sort((x, y) => y[1].a - x[1].a).map(([k, x]) => `${ATT_STYLE[k]} ${x.a} (${x.sh} shots, ${x.g} goals)`).join(' · ') || '—';
+    const st = a.stats, row = (label, k) => `<tr><td style="text-align:right;">${st[k].home ?? '–'}</td><td style="text-align:center;color:#8a939c;">${label}</td><td>${st[k].away ?? '–'}</td></tr>`;
+    const pred = ((getSlice('predictions') || { data: {} }).data || {})[matchId];
+    const box = document.createElement('div');
+    box.id = 'tma-match-result';
+    box.style.cssText = 'margin:8px auto;max-width:640px;background:#161c22;border:1px solid #2f7d3266;border-radius:10px;padding:10px 14px;color:#e4e7ea;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:12px;';
+    box.innerHTML = `
+      <details open><summary style="cursor:pointer;font-weight:700;">Result — TM has already played this match</summary>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0;font-size:15px;font-weight:700;">
+          <span>${esc(H.club_name || 'Home')}</span><span style="font-size:20px;color:#7fb2e0;">${a.score.home} – ${a.score.away}</span><span>${esc(A.club_name || 'Away')}</span>
+        </div>
+        ${pred ? `<div style="text-align:center;color:#8a939c;margin-bottom:6px;">TM Advisor predicted ${pred.gd >= 0 ? '+' : ''}${pred.gd.toFixed(1)} goals for us</div>` : ''}
+        <table style="width:100%;border-collapse:collapse;">
+          ${row('Possession %', 'possession')}${row('Shots', 'shots')}${row('On target', 'shotsOnTarget')}${row('Set pieces', 'setPieces')}${row('Penalties', 'penalties')}${row('Yellow cards', 'yellows')}${row('Red cards', 'reds')}
+        </table>
+        <div style="margin-top:8px;">${events.map(e => `<div style="display:flex;gap:8px;${e.side === 'away' ? 'flex-direction:row-reverse;text-align:right;' : ''}padding:2px 0;border-top:1px solid #2b323b55;"><span style="color:#8a939c;min-width:30px;">${e.minute}'</span><span>${icon[e.type] || ''} ${esc(e.player)}</span></div>`).join('') || '<div style="color:#8a939c;">No events.</div>'}</div>
+        <div style="margin-top:8px;color:#8a939c;">Attacks — ${esc(H.club_name || 'Home')}: ${esc(styleLine('home'))}</div>
+        <div style="color:#8a939c;">Attacks — ${esc(A.club_name || 'Away')}: ${esc(styleLine('away'))}</div>
+      </details>`;
+    const anchor = document.querySelector('.main_center') || document.body;
+    anchor.insertBefore(box, anchor.firstChild);
   }
 
   function cacheMatchSummary(match) {
@@ -3010,7 +3058,8 @@
   // youths (≤ RESERVE_MAX_AGE), so next year counts double there. One budget (Spending
   // Guidance) for both; the bid is current — an auction can still go higher.
   const BUY_LIST_LEN = 8;
-  const BUY_VALUE_MIN_SCORE = 8; // heuristic: value buys must still be a real upgrade, not +1 for nothing
+  const BUY_VALUE_MIN_SCORE = 8;
+  const BUY_OVERPRICE = 1.3; // heuristic: more than 30% over the market rate for his R5 and age is out // heuristic: value buys must still be a real upgrade, not +1 for nothing
   const PROJECT_YEARS = 1;
   // Growth projection, from YOUR club's measured training (so it reflects your training
   // ground, academy and custom plans): players_ar `plot` is each player's weekly TI; TM's
@@ -3096,6 +3145,16 @@
     const now0 = squad.map(p => ({ ...p })), next = squad.map(p => projectPlayer({ ...p }, PROJECT_YEARS));
     return { now: { squad: now0, base: bestFormation(now0) }, next: { squad: next, base: bestFormation(next) } };
   }
+  function solve3(A, y) { // Gaussian elimination for the 3x3 normal equations
+    const M = A.map((r, i) => [...r, y[i]]);
+    for (let i = 0; i < 3; i++) {
+      const piv = M.slice(i).reduce((bi, r, k) => Math.abs(r[i]) > Math.abs(M[bi][i]) ? i + k : bi, i);
+      [M[i], M[piv]] = [M[piv], M[i]];
+      if (Math.abs(M[i][i]) < 1e-12) return null;
+      for (let k = 0; k < 3; k++) if (k !== i) { const f = M[k][i] / M[i][i]; for (let j = i; j < 4; j++) M[k][j] -= f * M[i][j]; }
+    }
+    return M.map((r, i) => r[3] / r[i]);
+  }
   function buildBuyLists() {
     const prefs = loadShortlistPrefs('senior');
     const maxAge = prefs.maxAge != null ? prefs.maxAge : SENIOR_CRITERIA.maxAgeDefault;
@@ -3129,7 +3188,7 @@
       const score = j.now.gain + nextWeight * j.next.gain;
       return { id: c.id, name: c.name, age: c.age, fp: c.fp, nat: c.nat || null, r5: Number(Number(c._r5).toFixed(1)),
         routine: c.routine != null ? Number(Number(c.routine).toFixed(1)) : null, asi: c.asi != null ? Number(c.asi) : null, wage: c.wage || null,
-        price, minBid: minPrice(c), ends: c.ends || null, estValue: sta, maxValue: c.asi != null && ageMonths ? calcMaxSellPrice(Number(c.asi), ageMonths, sta) : null,
+        price, minBid: minPrice(c), ends: c.ends || null, estValue: sta, fair: fairPrice(c), maxValue: c.asi != null && ageMonths ? calcMaxSellPrice(Number(c.asi), ageMonths, sta) : null,
         gain: Number(j.now.gain.toFixed(1)), gainNext: Number(j.next.gain.toFixed(1)), slot: j.now.slot, replaces: j.now.replaces,
         pace: c.age < 26 ? Math.round(seasonGain(c, c.age, null)) : null, peak: peakProjection(c),
         score: Number(score.toFixed(1)), perM: score / Math.max(0.1, price / 1e6), steal: sta != null && minPrice(c) < sta * 0.85 && !!c.ends && c.ends - now() < 3600e3 };
@@ -3145,12 +3204,27 @@
       });
       return { best, value, bySlot, upgrades: rows.length, foreignXi: ctx.now.base.lineup.filter(l => isForeign(l.player)).length };
     };
+    // What the market charges for a given R5 and age (heuristic): least squares of ln(price) on
+    // R5 and age over every listing in budget. A buy priced well above that is overpriced for
+    // what he is, however much he'd help — "at 190M he should be 100+", as the user put it.
+    const fit = (() => {
+      const pts = pool.map(c => [Number(c._r5), Number(c.age), Math.log(Math.max(1e5, likelyPrice(c)))]).filter(x => x.every(isFinite));
+      if (pts.length < 30) return null;
+      const n = pts.length, X = pts.map(([r, a]) => [1, r, a]), y = pts.map(x => x[2]);
+      const XtX = [0, 1, 2].map(i => [0, 1, 2].map(j => X.reduce((t, r) => t + r[i] * r[j], 0)));
+      const Xty = [0, 1, 2].map(i => X.reduce((t, r, k) => t + r[i] * y[k], 0));
+      const b = solve3(XtX, Xty);
+      return b ? { b, n } : null;
+    })();
+    const fairPrice = c => fit ? Math.exp(fit.b[0] + fit.b[1] * Number(c._r5) + fit.b[2] * Number(c.age)) : null;
     const rowsA = [], rowsB = [];
     // Reserve buys are for the future: by 27 he must reach at least your weakest first-team
     // starter today, or he's only ever a reserve.
     const firstTeamBar = Math.min(...ctxA.now.base.lineup.filter(l => l.player).map(l => l.effectiveR5));
     pool.forEach(c => {
       const ja = judge(c, ctxA);
+      const fair = fairPrice(c);
+      if (fair != null && likelyPrice(c) > fair * BUY_OVERPRICE) return; // pays well over the going rate
       if (ja) { rowsA.push(row(c, ja, 1)); return; } // first-team material isn't a reserve signing
       if (ctxB && c.age < RESERVE_MAX_AGE + 1) { const jb = judge(c, ctxB); if (jb) { const r = row(c, jb, 2); if (r.peak != null && r.peak >= firstTeamBar) rowsB.push(r); } }
     });
@@ -3163,12 +3237,12 @@
    *  SECTION 5D — SPENDING GUIDANCE
    *  ------------------------------------------------------------
    *  A simple, clearly-labelled heuristic (not a game rule): keep roughly
-   *  12 weeks of wage bill in reserve, then treat half of whatever cash is
-   *  left over as this window's transfer budget. Tune the two constants
+   *  12 weeks of wage bill in reserve, then treat a quarter of whatever cash
+   *  is left over as this window's transfer budget. Tune the two constants
    *  below if that reserve doesn't match your risk tolerance.
    * ============================================================ */
   const BUDGET_WAGE_WEEKS_RESERVE = 12;
-  const BUDGET_SPEND_FRACTION = 0.5;
+  const BUDGET_SPEND_FRACTION = 0.25; // user: half (~190M) was far too much for one window
 
   function budgetGuidance() {
     const homeSlice = getSlice('home');
@@ -5488,7 +5562,7 @@
       <div class="tma-buy">
         <div class="tma-row"><span><a href="${playerLink(r)}" target="_blank" style="color:#79a8d6;text-decoration:none;font-weight:600;">${esc(r.name)} ↗</a>${r.steal ? ' <span class="tma-badge" title="Ends within the hour at a bid below his Sell-to-Agent price — you could sell him straight back to the agent for more">steal</span>' : ''}${natBadge(r)}</span><span class="tma-goodval" title="What he adds to that XI now → in a year">+${r.gain.toFixed(1)} → +${r.gainNext.toFixed(1)}</span></div>
         <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.routine != null ? ' · Rou ' + r.routine.toFixed(1) : ''}${r.pace ? ' · ~' + r.pace + ' skill pts next season' : ''}${r.peak != null ? ' · R5 at ' + PEAK_AGE + ' ≈ ' + r.peak.toFixed(1) : ''}</div>
-        <div class="tma-mini">Starts at <b>${esc(String(r.slot || '').toUpperCase())}</b>${r.replaces ? ' for ' + esc(r.replaces) : ''} · next bid ${fmtMoney(r.minBid)}${r.price > r.minBid ? ' · likely <b>' + fmtMoney(r.price) + '</b>' : ''}${r.ends ? ' · ends ' + endsIn(r.ends) : ''}${r.wage ? ' · wage ' + fmtMoney(r.wage) + '/wk' : ''}</div>
+        <div class="tma-mini">Starts at <b>${esc(String(r.slot || '').toUpperCase())}</b>${r.replaces ? ' for ' + esc(r.replaces) : ''} · next bid ${fmtMoney(r.minBid)}${r.price > r.minBid ? ' · likely <b>' + fmtMoney(r.price) + '</b>' : ''}${r.fair ? ' · market rate ' + fmtMoney(Math.round(r.fair)) : ''}${r.ends ? ' · ends ' + endsIn(r.ends) : ''}${r.wage ? ' · wage ' + fmtMoney(r.wage) + '/wk' : ''}</div>
       </div>`;
     const bucket = (title, list, open, empty) => `
       <details class="tma-sub" ${open ? 'open' : ''}><summary style="cursor:pointer;"><b>${title}</b> <span class="tma-badge">${list ? list.length : 0}</span></summary>
@@ -5515,7 +5589,7 @@
         <label class="tma-row" style="cursor:pointer;"><span>Include foreign players</span><input type="checkbox" id="tma-market-foreign" ${seniorPrefs.includeForeign !== false ? 'checked' : ''}></label>
         <button class="tma-btn" id="tma-market-scan">🔎 Scan the transfer market</button>
         <div class="tma-progress" id="tma-market-status">${ms && ms.data ? `${ms.data.unique} listings${buys && buys.A ? ` · ${buys.considered} in budget` : ''}` : ''}</div>
-        <div class="tma-mini" style="margin-top:4px;">Gains are what a player adds to that team's best XI (R5 with TM's position penalty and routine sharing), now → in a year. Budget = half of cash above the wage reserve; growth projection by age (own heuristics). Price = the next bid, or his Sell-to-Agent price if higher unless the auction ends within the hour (others will outbid a bargain) — own heuristic. Never bids for you.</div>
+        <div class="tma-mini" style="margin-top:4px;">Gains are what a player adds to that team's best XI (R5 with TM's position penalty and routine sharing), now → in a year. Budget = a quarter of cash above the wage reserve; players priced over 30% above the market rate for their R5 and age are left out; growth projection by age (own heuristics). Price = the next bid, or his Sell-to-Agent price if higher unless the auction ends within the hour (others will outbid a bargain) — own heuristic. Never bids for you.</div>
       </div>`;
     body.innerHTML = `
       ${scanHtml}

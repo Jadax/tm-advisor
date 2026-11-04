@@ -70,13 +70,14 @@ Adds **Routine**, **Skill Index**, and **R5** columns directly to the game's own
 
 ### 🔍 Scouting & Transfers
 
-- **One budget, one scan** — the Scouting tab (on the transfer pages) shows your cash, the wage reserve it keeps back (12 weeks), your **transfer budget** (half of what's left). One set of filters: max age (27 by default — TM's decline starts at 28) and foreign players. Opening the tab scans the whole transfer list by itself when the last scan is over 12 hours old. Read-only: it never bids.
+- **One budget, one scan** — the Scouting tab (on the transfer pages) shows your cash, the wage reserve it keeps back (12 weeks), your **transfer budget** (a quarter of what's left). One set of filters: max age (27 by default — TM's decline starts at 28) and foreign players. Opening the tab scans the whole transfer list by itself when the last scan is over 12 hours old. Read-only: it never bids.
 - **Split by team** — a **First team** section and a **Reserves** section, each with a position-by-position upgrade map (weakest starter first), **Best buys** (biggest total gain) and **Value buys** (gain per million), all within budget and collapsible.
 - **Upgrades now *and* next year, always** — a player is only listed if he improves that team's best XI today **and** still does a year from now, with both him and your squad projected forward by age (growth tapers from 20 and stops at 28, after TM's own development guide — the curve itself is a heuristic). Gains show as *now → next year* (e.g. +6.1 → +12.1). Position, depth, TM's out-of-position penalty and routine sharing all count.
 - **Projections from your own training** — your players' weekly training intensity (read on every run) gives your club's growth curve by age, which reflects your training ground, academy and custom plans. Targets are projected with it, scaled by their talent, with TM's diminishing returns on high skills. Each line shows the projected R5 at 27 (the last age before TM's decline). The Training progress card shows the same for your own squad: skill points gained since tracking began and R5 now → at 27.
 - **5-foreigner limit** — TM allows at most 5 foreign players across XI + bench; line-ups respect it, and a foreign signing only shows a gain while there's room. Home-nation players are unlimited.
 - **Reserves are for development** — only youths aged 21 or under who'd improve the reserve XI (next year counting double) and are projected to reach your weakest first-team starter's level by 27; anyone good enough for the first team is listed there instead.
-- Each line shows where he'd start, who he'd replace, his bid, Sell-to-Agent price and wage, and how fast he's growing. A **steal** badge marks a bid below his Sell-to-Agent price. Bids are current — an auction can still go higher.
+- **Never overpriced** — every listing in budget sets a market rate for R5 and age; anyone priced over 30% above it is left out, however much he'd help (heuristic).
+- Each line shows where he'd start, who he'd replace, his bid, the market rate, his wage, and how fast he's growing. A **steal** badge marks a bid below his Sell-to-Agent price. Bids are current — an auction can still go higher.
 - **Youth prospects** — youngsters (18–20) ranked by **development pace** (skill points per year since 16, from their SI) — boosted when a scout report shows growth headroom. Collapsible, like the scouts' potential board.
 - **Valuation** — shows exact Sell-to-Agent and Max Sell Price for any player with known skills.
 
@@ -93,6 +94,8 @@ On the Tactics tab, flags each squad player's weak **primary skills** for their 
 Ranks every upgradeable facility by ROI — payback period, income gain, maintenance cost. Prioritises youth/training facilities first, then income generators, then everything else. Flags sustainability warnings before you overspend.
 
 ### ⚔ Match Page Enhancement
+
+- **Result before the page shows it** — TM plays every match ahead of kickoff. The match page now reads the finished report and shows the score, possession, shots, set pieces, penalties and cards, a minute-by-minute timeline (goals, cards, injuries, subs and mentality changes) and how each side built its attacks — plus what TM Advisor predicted. Collapsible if you'd rather not see it.
 
 - **R5 overlay** — computes and displays R5 for every player on both teams, with per-team averages.
 - **Full match stats** — possession, shots, set pieces, cards, all broken down by side.
