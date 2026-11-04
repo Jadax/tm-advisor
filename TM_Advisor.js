@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.25.1
+// @version      3.26.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -4346,20 +4346,37 @@
     });
     return out;
   }
-  // A youth scout needs 20 Dev as well (user rule): the guide's Dev skill is what judges bloom
-  // and development, the whole point of scouting a youth.
-  const youthCapable = s => s.yth >= SCOUT_MIN && s.dev >= SCOUT_MIN;
-  const scoutRole = s => youthCapable(s) && s.sen < SCOUT_MIN ? 'youth' : s.sen >= SCOUT_MIN && !youthCapable(s) ? 'senior' : s.sen >= SCOUT_MIN ? 'both' : null;
-  // Heuristic ranking after the must-have 20: youths need the bloom read (Dev — the guide's own
-  // tip is 19-20 in Yth AND Dev), seniors the specialist peaks.
-  // "TM - Players Scout" v9 trusts a report's potential only from Sen/Yth ≥19 AND Dev ≥19, so Dev
-  // weighs heavily for both roles; the rest of the ranking is a heuristic.
-  const scoutRank = (s, role) => role === 'youth' ? s.dev * 4 + s.psy * 2 + s.phy + s.tac + s.tec : s.dev * 3 + (s.phy + s.tac + s.tec) * 1.5 + s.psy * 2;
+  // Scout value per role (user rule + guide): the role's own skill at 20 is required (Yth for
+  // youths, Sen for 20+) plus at least one more useful 20. What each extra skill is worth comes
+  // from the guide's scouting page — Dev judges bloom/development (what a youth report is for),
+  // Phy/Tac/Tec the specialist peaks, Psy the hidden traits; the other age skill is wasted.
+  // "TM - Players Scout" v9 trusts 19s as well, so a 19 counts part (weights are heuristics).
+  const SCOUT_SKILL_VALUE = {
+    youth: { dev: 3, phy: 1, tac: 1, tec: 1, psy: 1 },
+    senior: { dev: 1.5, phy: 1.5, tac: 1.5, tec: 1.5, psy: 1 },
+  };
+  const SCOUT_COST_WEEKS = 26; // heuristic horizon: sign-on fee + half a year of wages
+  const scoutLevel = v => v >= SCOUT_MIN ? 1 : v >= 19 ? 0.6 : 0;
+  const scoutKey = role => role === 'youth' ? 'yth' : 'sen';
+  function scoutValue(s, role) {
+    if (s[scoutKey(role)] < SCOUT_MIN) return null;
+    const w = SCOUT_SKILL_VALUE[role];
+    const extras = Object.keys(w).filter(k => s[k] >= SCOUT_MIN);
+    if (!extras.length) return null; // a bare Yth/Sen 20 reads ability, not what the player will become
+    return 3 + Object.entries(w).reduce((t, [k, x]) => t + x * scoutLevel(s[k]), 0);
+  }
+  const scoutCost = s => (s.fee || 0) + SCOUT_COST_WEEKS * (s.wage || 0);
+  const scoutRoi = (s, role) => { const v = scoutValue(s, role); return v == null ? null : v / Math.max(0.1, scoutCost(s) / 1e6); };
+  const scoutRole = s => scoutValue(s, 'youth') != null && s.sen < SCOUT_MIN ? 'youth' : scoutValue(s, 'senior') != null && s.yth < SCOUT_MIN ? 'senior' : s.sen >= SCOUT_MIN && s.yth >= SCOUT_MIN ? 'both' : null;
+  // Best value for money among the qualifiers; a Sen+Yth double-20 only when nothing else is.
   function bestScoutFor(list, role) {
-    const key = role === 'youth' ? 'yth' : 'sen';
-    const ok = list.filter(s => role === 'youth' ? youthCapable(s) : s[key] >= SCOUT_MIN);
+    const ok = list.filter(s => scoutValue(s, role) != null);
     const single = ok.filter(s => scoutRole(s) === role);
-    return (single.length ? single : ok).sort((x, y) => scoutRank(y, role) - scoutRank(x, role) || x.wage - y.wage)[0] || null;
+    const pool = single.length ? single : ok;
+    if (!pool.length) return null;
+    // Value for money decides; within 10% of the best, the more capable scout wins (heuristic).
+    const top = Math.max(...pool.map(s => scoutRoi(s, role)));
+    return pool.filter(s => scoutRoi(s, role) >= top * 0.9).sort((x, y) => scoutValue(y, role) - scoutValue(x, role) || scoutRoi(y, role) - scoutRoi(x, role))[0];
   }
   async function hireMissingScouts(mine, dryRun) {
     const covered = r => mine.some(s => scoutRole(s) === r || scoutRole(s) === 'both');
@@ -4370,10 +4387,10 @@
     const lines = [];
     for (const role of need) {
       const s = bestScoutFor(market, role);
-      if (!s) { lines.push(`no ${role} scout with ${role === 'youth' ? '20 Yth + 20 Dev' : '20 Sen'} on the hire list yet`); continue; }
-      const stats = SCOUT_COLS.map(k => k[0].toUpperCase() + k.slice(1) + ' ' + s[k]).join('/');
+      if (!s) { lines.push(`no ${role} scout with 20 ${role === 'youth' ? 'Yth' : 'Sen'} + another useful 20 on the hire list yet`); continue; }
+      const stats = SCOUT_COLS.map(k => k[0].toUpperCase() + k.slice(1) + ' ' + s[k]).join('/') + ` · value ${scoutValue(s, role).toFixed(1)} for ${fmtMoney(scoutCost(s))} over ${SCOUT_COST_WEEKS}wk`;
       if (!s.id) { lines.push(`${s.name} qualifies as ${role} scout but has no Hire button`); continue; }
-      if (s.fee + 26 * s.wage > SCOUT_BUDGET_SHARE * cash) { lines.push(`${s.name} (${role}, ${stats}) is too dear: ${fmtMoney(s.fee)} fee + ${fmtMoney(s.wage)}/wk`); continue; }
+      if (scoutCost(s) > SCOUT_BUDGET_SHARE * cash) { lines.push(`${s.name} (${role}, ${stats}) is too dear: ${fmtMoney(s.fee)} fee + ${fmtMoney(s.wage)}/wk`); continue; }
       if (dryRun) { lines.push(`would hire ${s.name} as ${role} scout (${stats}; ${fmtMoney(s.fee)} + ${fmtMoney(s.wage)}/wk)`); continue; }
       await tmPost('/scouts/hire/', { session_id: SESSION.id, scout_hire: 1, scout: s.id }); // the page's own hire form
       await sleep(300);
