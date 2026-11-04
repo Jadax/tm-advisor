@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.29.0
+// @version      3.29.1
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -3232,7 +3232,8 @@
       const best = [...rows].sort((x, y) => y.score - x.score || x.price - y.price).slice(0, BUY_LIST_LEN);
       const value = rows.filter(r => r.score >= BUY_VALUE_MIN_SCORE).sort((x, y) => y.perM - x.perM || y.score - x.score).slice(0, BUY_LIST_LEN);
       const bySlot = ctx.now.base.lineup.filter(l => l.player).sort((x, y) => x.effectiveR5 - y.effectiveR5).map(l => {
-        const here = rows.filter(r => r.slot === l.slot);
+        // By who he'd replace: in his own best formation the same spot can carry another slot name.
+        const here = rows.filter(r => r.replaces ? r.replaces === l.player.name : r.slot === l.slot);
         const top = [...here].sort((x, y) => y.score - x.score)[0] || null;
         const val = [...here].sort((x, y) => y.perM - x.perM)[0] || null;
         return { slot: l.slot, name: l.player.name, r5: Number(l.effectiveR5.toFixed(1)), below: l.effectiveR5 < MIN_LINEUP_R5, best: top, value: val && (!top || val.id !== top.id) ? val : null };
