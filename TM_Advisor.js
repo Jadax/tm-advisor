@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.24.0
+// @version      3.24.1
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -2996,6 +2996,7 @@
   // youths (≤ RESERVE_MAX_AGE), so next year counts double there. One budget (Spending
   // Guidance) for both; the bid is current — an auction can still go higher.
   const BUY_LIST_LEN = 8;
+  const BUY_VALUE_MIN_SCORE = 8; // heuristic: value buys must still be a real upgrade, not +1 for nothing
   const PROJECT_YEARS = 1;
   // Share of a player's career-average pace (youthPace) he keeps at each age. Own heuristic,
   // shaped by TM's guide (Player Development): training gains taper to the TI-1 floor by 26-27
@@ -3027,14 +3028,19 @@
     const maxAge = prefs.maxAge != null ? prefs.maxAge : SENIOR_CRITERIA.maxAgeDefault;
     const budget = budgetGuidance();
     const cap = budget ? budget.recommendedMax : null;
+    const own = (getSlice('ownSquads') || {}).data;
     const sl = getSlice('players');
     const all = sl && sl.data ? sl.data : [];
     const bTeam = window.SESSION && SESSION.b_team ? String(SESSION.b_team) : null;
-    const ctxA = teamContext(firstTeamOnly(all));
+    const ctxA = teamContext(own && own.A && own.A.length ? own.A : firstTeamOnly(all));
     if (!ctxA) return null;
-    const ctxB = bTeam ? teamContext(all.filter(p => String(p.club) === bTeam)) : null;
-    const pool = applyUserPrefs(collectYouthPool().filter(p => p.age != null && p.age <= maxAge + 1 && p._r5 != null && !isNaN(p._r5) && p.skills && Object.keys(p.skills).length >= 11 && p.bid), { includeForeign: prefs.includeForeign, maxCost: Number.MAX_SAFE_INTEGER })
-      .filter(p => cap == null || parseMoney(p.bid) <= cap);
+    const ctxB = own && own.B && own.B.length ? teamContext(own.B) : bTeam ? teamContext(all.filter(p => String(p.club) === bTeam)) : null;
+    // Likely price (heuristic): a bid under his Sell-to-Agent price rarely survives — anyone can
+    // outbid and still resell to the agent at a profit — unless the auction ends within the hour.
+    const minPrice = c => c.nextBid != null ? c.nextBid : parseMoney(c.bid);
+    const likelyPrice = c => { const m = minPrice(c), sta = estimateBankPrice(c); return c.ends && c.ends - now() < 3600e3 ? m : Math.max(m, sta || 0); };
+    const pool = applyUserPrefs(collectYouthPool().filter(p => p.age != null && p.age < maxAge + 1 && p._r5 != null && !isNaN(p._r5) && p.skills && Object.keys(p.skills).length >= 11 && (p.bid != null || p.nextBid != null) && !(p.ends && p.ends < now())), { includeForeign: prefs.includeForeign, maxCost: Number.MAX_SAFE_INTEGER })
+      .filter(p => cap == null || likelyPrice(p) <= cap);
     const judge = (c, ctx) => {
       const nowX = xiImpact(c, ctx.now);
       if (nowX.gain < SENIOR_CRITERIA.minXiGain) return null;
@@ -3043,19 +3049,19 @@
       return { now: nowX, next: nextX };
     };
     const row = (c, j, nextWeight) => {
-      const price = parseMoney(c.bid), sta = estimateBankPrice(c), ageMonths = ageMonthsOf(c);
+      const price = likelyPrice(c), sta = estimateBankPrice(c), ageMonths = ageMonthsOf(c);
       const pace = youthPace(c);
       const score = j.now.gain + nextWeight * j.next.gain;
       return { id: c.id, name: c.name, age: c.age, fp: c.fp, nat: c.nat || null, r5: Number(Number(c._r5).toFixed(1)),
         routine: c.routine != null ? Number(Number(c.routine).toFixed(1)) : null, asi: c.asi != null ? Number(c.asi) : null, wage: c.wage || null,
-        price, estValue: sta, maxValue: c.asi != null && ageMonths ? calcMaxSellPrice(Number(c.asi), ageMonths, sta) : null,
+        price, minBid: minPrice(c), ends: c.ends || null, estValue: sta, maxValue: c.asi != null && ageMonths ? calcMaxSellPrice(Number(c.asi), ageMonths, sta) : null,
         gain: Number(j.now.gain.toFixed(1)), gainNext: Number(j.next.gain.toFixed(1)), slot: j.now.slot, replaces: j.now.replaces,
         pace: pace && c.age < 24 ? Math.round(pace.pace * paceKept(c.age)) : null,
-        score: Number(score.toFixed(1)), perM: price > 0 ? score / (price / 1e6) : Infinity, steal: price != null && sta != null && price < sta * 0.85 };
+        score: Number(score.toFixed(1)), perM: score / Math.max(0.1, price / 1e6), steal: sta != null && minPrice(c) < sta * 0.85 && !!c.ends && c.ends - now() < 3600e3 };
     };
     const lists = (rows, ctx) => {
       const best = [...rows].sort((x, y) => y.score - x.score || x.price - y.price).slice(0, BUY_LIST_LEN);
-      const value = rows.filter(r => r.score >= 2 * SENIOR_CRITERIA.minXiGain).sort((x, y) => y.perM - x.perM || y.score - x.score).slice(0, BUY_LIST_LEN);
+      const value = rows.filter(r => r.score >= BUY_VALUE_MIN_SCORE).sort((x, y) => y.perM - x.perM || y.score - x.score).slice(0, BUY_LIST_LEN);
       const bySlot = ctx.now.base.lineup.filter(l => l.player).sort((x, y) => x.effectiveR5 - y.effectiveR5).map(l => {
         const here = rows.filter(r => r.slot === l.slot);
         const top = [...here].sort((x, y) => y.score - x.score)[0] || null;
@@ -3091,7 +3097,8 @@
     const finSlice = getSlice('finances');
     const cash = (homeSlice && homeSlice.data && homeSlice.data.cash != null) ? homeSlice.data.cash
       : (finSlice && finSlice.data && finSlice.data.balance != null ? finSlice.data.balance : null);
-    if (cash == null) return null;
+    const cashNow = window.SESSION && SESSION.cash != null ? Number(SESSION.cash) : cash; // live on every page; cached slices can be days old
+    if (cashNow == null) return null;
     let weeklyWage = null;
     if (finSlice && finSlice.data && finSlice.data.weekly) {
       const row = Object.entries(finSlice.data.weekly).find(([k]) => /wage/i.test(k));
@@ -3100,9 +3107,9 @@
       if (row && row[1] && row[1].length) weeklyWage = Math.abs(parseMoney(row[1][row[1].length - 1]));
     }
     const buffer = weeklyWage != null ? weeklyWage * BUDGET_WAGE_WEEKS_RESERVE : 0;
-    const spendable = Math.max(0, cash - buffer);
+    const spendable = Math.max(0, cashNow - buffer);
     const recommendedMax = Math.round(spendable * BUDGET_SPEND_FRACTION);
-    return { cash, weeklyWage, buffer, spendable, recommendedMax };
+    return { cash: cashNow, weeklyWage, buffer, spendable, recommendedMax };
   }
 
   /* ============================================================
@@ -3817,11 +3824,22 @@
     return {
       id: String(x.id), name: x.name, fp: displayFp(x.fp_format || ''), age: ageMonths ? ageMonths / 12 : null, ageMonths,
       asi: Number(x.asi) || null, routine: x.routine != null ? Number(x.routine) : null, bid: x.bid != null ? String(x.bid) : null,
+      // next_bid = the least you can bid right now (the asking price while nobody has bid — bid
+      // is then 0); time = seconds left on the auction.
+      nextBid: x.next_bid != null ? parseMoney(String(x.next_bid)) : null, ends: Number(x.time) > 0 ? now() + Number(x.time) * 1000 : null,
       time: x.time, nat: x.nat || null, rec: Number(x.rec) / 2 || null, skills, _seen: now(), _scan: true,
     };
   }
   async function marketScan(onProgress) {
     const prefs = loadShortlistPrefs('senior');
+    // Judge against today's squads and wage bill, read now — not whatever pages happen to be
+    // cached (a fresh browser had neither, and the lists came out empty).
+    onProgress && onProgress('Reading your squads and finances…');
+    try {
+      const [A, B] = await Promise.all([fetchOpponentSquadReal(clubId), SESSION.b_team ? fetchOpponentSquadReal(String(SESSION.b_team)) : Promise.resolve([])]);
+      if (A.length) setSlice('ownSquads', { A, B });
+    } catch (e) { console.warn('TM Advisor: own squads', e); }
+    try { setSlice('finances', parseFinances(await fetchDoc('/finances/'))); } catch (e) { console.warn('TM Advisor: finances', e); }
     const foreign = prefs.includeForeign !== false ? 'for/' : '';
     const searches = [];
     MARKET_GROUPS.forEach(g => MARKET_BANDS.forEach(([a, b]) => searches.push(`/${g}/${foreign}amin/${a}/amax/${b}/`)));
@@ -5353,11 +5371,12 @@
 
     const ms = getSlice('marketScan');
     const buys = (getSlice('marketBuys') || {}).data || null;
+    const endsIn = t => { const m = Math.round((t - now()) / 60e3); return m < 60 ? `in ${Math.max(0, m)}m` : m < 1440 ? `in ${Math.round(m / 60)}h` : `in ${Math.round(m / 1440)}d`; };
     const buyRow = r => `
       <div class="tma-buy">
-        <div class="tma-row"><span><a href="${playerLink(r)}" target="_blank" style="color:#79a8d6;text-decoration:none;font-weight:600;">${esc(r.name)} ↗</a>${r.steal ? ' <span class="tma-badge" title="Bid is below his Sell-to-Agent price — you could sell him straight back to the agent for more">steal</span>' : ''}${natBadge(r)}</span><span class="tma-goodval" title="What he adds to that XI now → in a year">+${r.gain.toFixed(1)} → +${r.gainNext.toFixed(1)}</span></div>
+        <div class="tma-row"><span><a href="${playerLink(r)}" target="_blank" style="color:#79a8d6;text-decoration:none;font-weight:600;">${esc(r.name)} ↗</a>${r.steal ? ' <span class="tma-badge" title="Ends within the hour at a bid below his Sell-to-Agent price — you could sell him straight back to the agent for more">steal</span>' : ''}${natBadge(r)}</span><span class="tma-goodval" title="What he adds to that XI now → in a year">+${r.gain.toFixed(1)} → +${r.gainNext.toFixed(1)}</span></div>
         <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.routine != null ? ' · Rou ' + r.routine.toFixed(1) : ''}${r.pace ? ' · growing ~' + r.pace + ' skill pts/yr' : ''}</div>
-        <div class="tma-mini">Starts at <b>${esc(String(r.slot || '').toUpperCase())}</b>${r.replaces ? ' for ' + esc(r.replaces) : ''} · bid <b>${fmtMoney(r.price)}</b>${r.estValue ? ' · agent ' + fmtMoney(r.estValue) : ''}${r.wage ? ' · wage ' + fmtMoney(r.wage) + '/wk' : ''}</div>
+        <div class="tma-mini">Starts at <b>${esc(String(r.slot || '').toUpperCase())}</b>${r.replaces ? ' for ' + esc(r.replaces) : ''} · next bid ${fmtMoney(r.minBid)}${r.price > r.minBid ? ' · likely <b>' + fmtMoney(r.price) + '</b>' : ''}${r.ends ? ' · ends ' + endsIn(r.ends) : ''}${r.wage ? ' · wage ' + fmtMoney(r.wage) + '/wk' : ''}</div>
       </div>`;
     const bucket = (title, list, open, empty) => `
       <details class="tma-sub" ${open ? 'open' : ''}><summary style="cursor:pointer;"><b>${title}</b> <span class="tma-badge">${list ? list.length : 0}</span></summary>
@@ -5384,7 +5403,7 @@
         <label class="tma-row" style="cursor:pointer;"><span>Include foreign players</span><input type="checkbox" id="tma-market-foreign" ${seniorPrefs.includeForeign !== false ? 'checked' : ''}></label>
         <button class="tma-btn" id="tma-market-scan">🔎 Scan the transfer market</button>
         <div class="tma-progress" id="tma-market-status">${ms && ms.data ? `${ms.data.unique} listings${buys && buys.A ? ` · ${buys.considered} in budget` : ''}` : ''}</div>
-        <div class="tma-mini" style="margin-top:4px;">Gains are what a player adds to that team's best XI (R5 with TM's position penalty and routine sharing), now → in a year. Budget = half of cash above the wage reserve; growth projection by age (own heuristics). Bids are current — an auction can still go higher. Never bids for you.</div>
+        <div class="tma-mini" style="margin-top:4px;">Gains are what a player adds to that team's best XI (R5 with TM's position penalty and routine sharing), now → in a year. Budget = half of cash above the wage reserve; growth projection by age (own heuristics). Price = the next bid, or his Sell-to-Agent price if higher unless the auction ends within the hour (others will outbid a bargain) — own heuristic. Never bids for you.</div>
       </div>`;
     body.innerHTML = `
       ${scanHtml}
