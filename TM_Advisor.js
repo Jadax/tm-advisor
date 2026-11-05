@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.31.0
+// @version      3.32.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -3170,10 +3170,16 @@
   }
   // R5 at his last pre-decline age (27: TI drops to 1 then, decline from 28 — TM guide).
   const PEAK_AGE = 27;
-  function peakProjection(p) {
-    const age = Number(p.age) || 0;
-    if (age < 15 || age >= PEAK_AGE) return null; // unknown age would project a career from birth
-    const q = projectPlayer({ ...p }, Math.max(1, Math.round(PEAK_AGE - age)));
+  // Horizon = the Max age you buy up to (user): "R5 at 30" for a 30 cap, decline included —
+  // beyond 27 your club's measured TI (negative from ~30) takes over. Default PEAK_AGE.
+  function projectionAge() {
+    const a = Number(loadShortlistPrefs('senior').maxAge);
+    return a >= 18 && a <= 40 ? a : PEAK_AGE;
+  }
+  function peakProjection(p, toAge) {
+    const age = Number(p.age) || 0, target = toAge || projectionAge();
+    if (age < 15 || age >= target) return null; // unknown age would project a career from birth
+    const q = projectPlayer({ ...p }, Math.max(1, Math.round(target - age)));
     return q && q._r5 != null ? Number(Number(q._r5).toFixed(1)) : null;
   }
   function teamContext(squad) {
@@ -3230,7 +3236,7 @@
         if (loss >= SENIOR_CRITERIA.minXiGain) keep = `starts (${loss.toFixed(1)} R5 points lost without him)`;
       }
       if (!keep && team === 'A' && bench.has(id)) keep = 'on the bench';
-      if (!keep && age < 24 && peak != null && peak >= bar) keep = `prospect — projected R5 ${peak.toFixed(1)} at ${PEAK_AGE}`;
+      if (!keep && age < 24 && peak != null && peak >= bar) keep = `prospect — projected R5 ${peak.toFixed(1)} at ${projectionAge()}`;
       if (!keep && team === 'B' && bXi.has(id) && age < RESERVE_MAX_AGE + 1) keep = 'youth starting for the reserves';
       const why = keep ? null : [
         team === 'A' ? 'not in your XI or bench' : 'not developing toward the first team',
@@ -5514,7 +5520,7 @@
     return `
       <div class="tma-card">
         <h4>Training progress <span class="tma-badge">${plans.length} players · both teams</span></h4>
-        <div class="tma-mini" style="margin-bottom:6px;">TI this week / 4-week average, skill points gained in ~4 weeks and since tracking began (weekly snapshots after Tuesday's training), R5 now → projected at ${PEAK_AGE} (last age before TM's decline, from your club's own training curve), and the custom plan (groups: str·wor·sta – mar·tac – cro·pac – pas·tec·set – hea·pos – fin·lon).</div>
+        <div class="tma-mini" style="margin-bottom:6px;">TI this week / 4-week average, skill points gained in ~4 weeks and since tracking began (weekly snapshots after Tuesday's training), R5 now → projected at ${projectionAge()} (your Max age on the Scouting tab — TM's decline starts at 28; from your club's own training curve), and the custom plan (groups: str·wor·sta – mar·tac – cro·pac – pas·tec·set – hea·pos – fin·lon).</div>
         ${(() => { const g = clubGrowth(); const parts = g.bands.map((b, i) => b.ti != null ? `${GROWTH_BANDS[i][0]}${GROWTH_BANDS[i][1] < 99 ? '–' + (GROWTH_BANDS[i][1] - 1) : '+'}: TI ${b.ti.toFixed(1)} (≈${(b.ti * TI_SKILL * SEASON_WEEKS).toFixed(0)} pts/season)` : null).filter(Boolean); return parts.length ? `<div class="tma-mini" style="margin-bottom:6px;">Your club's training by age — ${parts.join(' · ')}</div>` : ''; })()}
         ${rows.map(r => `<div class="tma-row"><span>${r.team === 'B' ? '<span class="tma-badge">res</span> ' : ''}${esc(r.name)} <span class="tma-mini">${r.age ? Math.floor(r.age) : '?'} · ${esc(String(r.slot).toUpperCase())}</span></span><span class="tma-mini" title="${esc(r.why)}">TI ${r.ti != null ? r.ti : '–'}${r.avg != null ? ' / ' + r.avg.toFixed(1) : ''} · ${r.g ? (r.g.gain >= 0 ? '+' : '') + r.g.gain + ' pts / ' + r.g.weeks + 'w' : 'tracking…'}${r.total && r.total.weeks > (r.g ? r.g.weeks : 0) ? ' (' + (r.total.gain >= 0 ? '+' : '') + r.total.gain + ' / ' + r.total.weeks + 'w)' : ''}${r.r5 != null ? ' · R5 ' + r.r5.toFixed(1) + (r.peak != null ? ' → ' + r.peak.toFixed(1) : '') : ''} · <b>${r.dots.join('-')}</b></span></div>`).join('')}
       </div>`;
@@ -5723,8 +5729,8 @@
     const endsIn = t => { const m = Math.round((t - now()) / 60e3); return m < 60 ? `in ${Math.max(0, m)}m` : m < 1440 ? `in ${Math.round(m / 60)}h` : `in ${Math.round(m / 1440)}d`; };
     const buyRow = r => `
       <div class="tma-buy">
-        <div class="tma-row"><span><a href="${playerLink(r)}" target="_blank" style="color:#79a8d6;text-decoration:none;font-weight:600;">${esc(r.name)} ↗</a>${r.steal ? ' <span class="tma-badge" title="Ends within the hour at a bid below his Sell-to-Agent price — you could sell him straight back to the agent for more">steal</span>' : ''}${natBadge(r)}</span><span class="tma-goodval" title="${r.slot ? 'What he adds to your XI now → in a year' : 'Projected R5 at ' + PEAK_AGE}">${r.slot ? '+' + r.gain.toFixed(1) + ' → +' + r.gainNext.toFixed(1) : 'R5 ' + r.r5.toFixed(1) + ' → ' + (r.peak != null ? r.peak.toFixed(1) : '?')}</span></div>
-        <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.routine != null ? ' · Rou ' + r.routine.toFixed(1) : ''}${r.ti != null ? ' · training TI ' + r.ti.toFixed(1) + '/wk' : ''}${r.pace ? ' · ~' + r.pace + ' skill pts next season' : ''}${r.peak != null ? ' · R5 at ' + PEAK_AGE + ' ≈ ' + r.peak.toFixed(1) : ''}</div>
+        <div class="tma-row"><span><a href="${playerLink(r)}" target="_blank" style="color:#79a8d6;text-decoration:none;font-weight:600;">${esc(r.name)} ↗</a>${r.steal ? ' <span class="tma-badge" title="Ends within the hour at a bid below his Sell-to-Agent price — you could sell him straight back to the agent for more">steal</span>' : ''}${natBadge(r)}</span><span class="tma-goodval" title="${r.slot ? 'What he adds to your XI now → in a year' : 'Projected R5 at ' + projectionAge()}">${r.slot ? '+' + r.gain.toFixed(1) + ' → +' + r.gainNext.toFixed(1) : 'R5 ' + r.r5.toFixed(1) + ' → ' + (r.peak != null ? r.peak.toFixed(1) : '?')}</span></div>
+        <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.routine != null ? ' · Rou ' + r.routine.toFixed(1) : ''}${r.ti != null ? ' · training TI ' + r.ti.toFixed(1) + '/wk' : ''}${r.pace ? ' · ~' + r.pace + ' skill pts next season' : ''}${r.peak != null ? ' · R5 at ' + projectionAge() + ' ≈ ' + r.peak.toFixed(1) : ''}</div>
         ${r.scout ? `<div class="tma-mini">🔍 Scouted${r.scout.potential != null ? ' · potential ' + r.scout.potential + '/20' : ''}${r.scout.dev ? ' · development ' + esc(r.scout.dev) : ''}${r.scout.peaks ? ' · peaks ' + ['phy', 'tac', 'tec'].map(k => (r.scout.peaks[k] || '?')).join('/') + ' (phy/tac/tec of 4)' : ''}</div>` : ''}
         <div class="tma-mini">${r.slot ? `Starts at <b>${esc(String(r.slot).toUpperCase())}</b>${r.replaces ? ' for ' + esc(r.replaces) : ''} · ` : ''}next bid ${fmtMoney(r.minBid)}${r.price > r.minBid ? ' · likely <b>' + fmtMoney(r.price) + '</b>' : ''}${r.fair ? ' · market rate ' + fmtMoney(Math.round(r.fair)) : ''}${r.ends ? ' · ends ' + endsIn(r.ends) : ''}${r.wage ? ' · wage ' + fmtMoney(r.wage) + '/wk' : ''}</div>
       </div>`;
@@ -5764,7 +5770,7 @@
       ${teamSection('First team', buys && buys.A, true, `R5 ≥ ${MIN_LINEUP_R5} (or under 24 and reaching it next season) <b>and</b> an upgrade to your best XI now and in a year (both sides projected). Best = biggest total gain; value = gain per million.`)}
       ${buys && buys.Y ? `
       <details class="tma-card"><summary style="cursor:pointer;"><h4 style="display:inline;">Youth prospects 🌱 <span class="tma-badge">${buys.Y.count}</span></h4></summary>
-        <div class="tma-mini" style="margin:4px 0;">Aged ≤ ${RESERVE_MAX_AGE}: they develop in the reserves. Listed only if projected to reach R5 ${buys.Y.bar.toFixed(1)} by ${PEAK_AGE} (your ${MIN_LINEUP_R5} floor, or your weakest starter if higher) — growth from his own training this season where his wage shows it, else your club's curve × his talent.</div>
+        <div class="tma-mini" style="margin:4px 0;">Aged ≤ ${RESERVE_MAX_AGE}: they develop in the reserves. Listed only if projected to reach R5 ${buys.Y.bar.toFixed(1)} by ${projectionAge()} (your ${MIN_LINEUP_R5} floor, or your weakest starter if higher) — growth from his own training this season where his wage shows it, else your club's curve × his talent.</div>
         ${bucket('Highest ceiling', buys.Y.best, true, 'No youth on the market is projected to reach that level within budget.')}
         ${bucket('Best value', buys.Y.value, false, 'None right now.')}
       </details>` : ''}
@@ -5772,10 +5778,10 @@
         const sl = (getSlice('sellList') || {}).data;
         if (!sl) return '';
         const line = r => `<div class="tma-buy"><div class="tma-row"><span><a href="${playerLink(r)}" target="_blank" style="color:#79a8d6;text-decoration:none;font-weight:600;">${esc(r.name)} ↗</a> <span class="tma-badge">${r.team === 'B' ? 'reserves' : 'first team'}</span></span><span>${r.sta ? fmtMoney(r.sta) : '—'}</span></div>
-          <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.peak != null ? ' → ' + r.peak.toFixed(1) + ' at ' + PEAK_AGE : ''}${r.wage ? ' · wage ' + fmtMoney(r.wage) + '/wk' : ''}</div>
+          <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.peak != null ? ' → ' + r.peak.toFixed(1) + ' at ' + projectionAge() : ''}${r.wage ? ' · wage ' + fmtMoney(r.wage) + '/wk' : ''}</div>
           <div class="tma-mini">${esc(r.why)}${r.staDrop > 0 ? ` · agent price falls ~${fmtMoney(Math.round(r.staDrop))} by next season` : ''}</div></div>`;
         return `<details class="tma-card"><summary style="cursor:pointer;"><h4 style="display:inline;">Sell recommendations <span class="tma-badge">${sl.sell.length}</span></h4></summary>
-          <div class="tma-mini" style="margin:4px 0;">Squad ${sl.size.A} + ${sl.size.B} reserves → ${sl.after.A} + ${sl.after.B} after these sales · about ${fmtMoney(sl.income)} from the agent · ${fmtMoney(sl.wages)}/wk in wages saved. Kept: your XI and bench, youths projected to reach R5 ${sl.bar.toFixed(1)} by ${PEAK_AGE}, and youths starting for the reserves; at least ${SELL_MIN_A} + ${SELL_MIN_B} players and ${SELL_MIN_GK} keepers per team stay (own heuristics). Price shown = Sell-to-Agent now — listing him can fetch more. Never sells for you.</div>
+          <div class="tma-mini" style="margin:4px 0;">Squad ${sl.size.A} + ${sl.size.B} reserves → ${sl.after.A} + ${sl.after.B} after these sales · about ${fmtMoney(sl.income)} from the agent · ${fmtMoney(sl.wages)}/wk in wages saved. Kept: your XI and bench, youths projected to reach R5 ${sl.bar.toFixed(1)} by ${projectionAge()}, and youths starting for the reserves; at least ${SELL_MIN_A} + ${SELL_MIN_B} players and ${SELL_MIN_GK} keepers per team stay (own heuristics). Price shown = Sell-to-Agent now — listing him can fetch more. Never sells for you.</div>
           ${sl.sell.map(line).join('') || '<div class="tma-mini">Nothing surplus right now.</div>'}
           ${sl.hold.length ? `<details class="tma-sub"><summary style="cursor:pointer;"><b>Surplus kept for numbers</b> <span class="tma-badge">${sl.hold.length}</span></summary>${sl.hold.map(line).join('')}</details>` : ''}
         </details>`;
@@ -5793,6 +5799,7 @@
       const fb = document.getElementById('tma-market-foreign'), ageEl = document.getElementById('tma-buy-maxage');
       ['senior', 'youth'].forEach(w => saveShortlistPrefs(w, { ...loadShortlistPrefs(w), includeForeign: !!(fb && fb.checked), ...(w === 'senior' && ageEl && ageEl.value ? { maxAge: Number(ageEl.value) } : {}) }));
       buildBuyLists();
+      try { buildSellList(); } catch (e) { console.warn('TM Advisor: sell list', e); }
       renderScouting();
     };
     ['tma-market-foreign', 'tma-buy-maxage'].forEach(id => { const el = document.getElementById(id); if (el) el.addEventListener('change', saveFilters); });
