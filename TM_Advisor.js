@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.30.1
+// @version      3.31.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -3291,14 +3291,18 @@
         score: Number(score.toFixed(1)), perM: score / Math.max(0.1, price / 1e6), steal: sta != null && minPrice(c) < sta * 0.85 && !!c.ends && c.ends - now() < 3600e3 };
     };
     const lists = (rows, ctx) => {
-      const best = [...rows].sort((x, y) => y.score - x.score || x.price - y.price).slice(0, BUY_LIST_LEN);
-      const value = rows.filter(r => r.score >= BUY_VALUE_MIN_SCORE).sort((x, y) => y.perM - x.perM || y.score - x.score).slice(0, BUY_LIST_LEN);
+      // One per position (the starter he'd replace), nobody in both lists.
+      const taken = new Set();
+      const onePer = (arr, key) => { const out = [], used = new Set(); [...arr].sort(key).forEach(r => { const pos = r.replaces || r.slot; if (out.length < BUY_LIST_LEN && !used.has(pos) && !taken.has(r.id)) { used.add(pos); taken.add(r.id); out.push(r); } }); return out; };
+      const best = onePer(rows, (x, y) => y.score - x.score || x.price - y.price);
+      const value = onePer(rows.filter(r => r.score >= BUY_VALUE_MIN_SCORE), (x, y) => y.perM - x.perM || y.score - x.score);
       const bySlot = ctx.now.base.lineup.filter(l => l.player).sort((x, y) => x.effectiveR5 - y.effectiveR5).map(l => {
         // By who he'd replace: in his own best formation the same spot can carry another slot name.
         const here = rows.filter(r => r.replaces ? r.replaces === l.player.name : r.slot === l.slot);
         const top = [...here].sort((x, y) => y.score - x.score)[0] || null;
         const val = [...here].sort((x, y) => y.perM - x.perM)[0] || null;
-        return { slot: l.slot, name: l.player.name, r5: Number(l.effectiveR5.toFixed(1)), below: l.effectiveR5 < MIN_LINEUP_R5, best: top, value: val && (!top || val.id !== top.id) ? val : null };
+        const pk = peakProjection(l.player);
+        return { slot: l.slot, id: l.player.id, name: l.player.name, r5: Number(l.effectiveR5.toFixed(1)), peak: pk, below: l.effectiveR5 < MIN_LINEUP_R5, best: top, value: val && (!top || val.id !== top.id) ? val : null };
       });
       return { best, value, bySlot, upgrades: rows.length, belowFloor: bySlot.filter(x => x.below).length, foreignXi: ctx.now.base.lineup.filter(l => isForeign(l.player)).length };
     };
@@ -3369,8 +3373,10 @@
     }
     const buffer = weeklyWage != null ? weeklyWage * BUDGET_WAGE_WEEKS_RESERVE : 0;
     const spendable = Math.max(0, cashNow - buffer);
-    const recommendedMax = Math.round(spendable * BUDGET_SPEND_FRACTION);
-    return { cash: cashNow, weeklyWage, buffer, spendable, recommendedMax };
+    const bp = loadShortlistPrefs('senior');
+    const share = bp.buyPct != null ? Number(bp.buyPct) : BUDGET_SPEND_FRACTION;
+    const recommendedMax = bp.budget != null && Number(bp.budget) > 0 ? Math.round(Number(bp.budget)) : Math.round(spendable * share);
+    return { cash: cashNow, weeklyWage, buffer, spendable, recommendedMax, share, custom: bp.budget != null && Number(bp.budget) > 0 };
   }
 
   /* ============================================================
@@ -4857,6 +4863,12 @@
   .tma-body::-webkit-scrollbar-thumb:hover { background:#7a7a8299; }
   /* ---- Cards ---- */
   .tma-buy { padding:6px 0; border-top:1px solid var(--tma-line); }
+  .tma-seg { display:inline-flex; gap:2px; }
+  .tma-segbtn { background:#161a1f; border:1px solid #2b323b80; color:#c7cdd3; border-radius:5px; padding:2px 7px; font-size:11px; cursor:pointer; }
+  .tma-segbtn.on { background:var(--tma-gold, #c9a227); color:#14171a; font-weight:700; }
+  table.tma-pos { width:100%; border-collapse:collapse; font-size:11.5px; margin-top:4px; }
+  table.tma-pos th { text-align:left; color:#8a939c; font-weight:600; padding:3px 4px; }
+  table.tma-pos td { vertical-align:top; padding:4px; border-top:1px solid var(--tma-line); }
   .tma-buy:first-of-type { border-top:0; }
   details.tma-card > summary { list-style:none; }
   details.tma-card > summary::before { content:'▸ '; color:var(--tma-text-dim, #8a939c); }
@@ -5720,10 +5732,12 @@
       <details class="tma-sub" ${open ? 'open' : ''}><summary style="cursor:pointer;"><b>${title}</b> <span class="tma-badge">${list ? list.length : 0}</span></summary>
         ${list && list.length ? list.map(buyRow).join('') : `<div class="tma-mini">${empty}</div>`}
       </details>`;
+    const pick = e => e ? `<a href="${playerLink(e)}" target="_blank" style="color:#79a8d6;text-decoration:none;font-weight:600;">${esc(e.name)}</a> <span class="tma-goodval">+${e.gain.toFixed(1)}</span><div class="tma-mini">${Math.floor(e.age)}y · R5 ${e.r5.toFixed(1)} · ${fmtMoney(e.price)}</div>` : '<span class="tma-mini">—</span>';
     const slotMap = t => t && t.bySlot && t.bySlot.length ? `
-      <details class="tma-sub"><summary style="cursor:pointer;"><b>Position by position</b> <span class="tma-mini">weakest starter first</span></summary>
-        ${t.bySlot.map(x => `<div class="tma-buy"><div class="tma-row"><span><b>${esc(x.slot.toUpperCase())}</b> ${esc(x.name)}</span><span style="${x.below ? 'color:var(--tma-amber);font-weight:700;' : ''}">R5 ${x.r5.toFixed(1)}${x.below ? ' ⚠' : ''}</span></div>
-          <div class="tma-mini">${x.best ? `Best: <a href="${playerLink(x.best)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${esc(x.best.name)}</a> +${x.best.gain.toFixed(1)} → +${x.best.gainNext.toFixed(1)} for ${fmtMoney(x.best.price)}` : 'No upgrade on the market within budget'}${x.value ? ` · Value: <a href="${playerLink(x.value)}" target="_blank" style="color:#79a8d6;text-decoration:none;">${esc(x.value.name)}</a> +${x.value.gain.toFixed(1)} for ${fmtMoney(x.value.price)}` : ''}</div></div>`).join('')}
+      <details class="tma-sub" open><summary style="cursor:pointer;"><b>By position</b> <span class="tma-mini">weakest starter first</span></summary>
+        <table class="tma-pos"><tr><th>Pos</th><th>Starter</th><th>Best</th><th>Value</th></tr>
+        ${t.bySlot.map(x => `<tr><td><b>${esc(x.slot.toUpperCase())}</b></td><td>${esc(x.name)}<div class="tma-mini" style="${x.below ? 'color:var(--tma-amber);font-weight:700;' : ''}">${x.r5.toFixed(1)}${x.peak != null ? ' → ' + x.peak.toFixed(1) : ''}${x.below ? ' ⚠' : ''}</div></td><td>${pick(x.best)}</td><td>${pick(x.value)}</td></tr>`).join('')}
+        </table>
       </details>` : '';
     const teamSection = (title, t, open, note) => `
       <details class="tma-card" ${open ? 'open' : ''}><summary style="cursor:pointer;"><h4 style="display:inline;">${title} <span class="tma-badge">${t ? t.upgrades : 0} upgrades</span></h4></summary>
@@ -5736,12 +5750,14 @@
         <h4>Transfer market <span class="tma-badge">${ms ? 'scanned ' + ago(ms.t) : 'not scanned yet'}</span></h4>
         ${budget0 ? `<div class="tma-row"><span>Cash</span><span>${fmtMoney(budget0.cash)}</span></div>
         ${budget0.weeklyWage != null ? `<div class="tma-row"><span>Kept back (${BUDGET_WAGE_WEEKS_RESERVE} wks of wages)</span><span>${fmtMoney(budget0.buffer)}</span></div>` : ''}
-        <div class="tma-row"><span>Transfer budget</span><span class="tma-goodval">${fmtMoney(budget0.recommendedMax)}</span></div>` : `<div class="tma-mini">Cash not read yet — open Home or Finances once.</div>`}
+        <div class="tma-row"><span>Transfer budget</span><span class="tma-goodval">${fmtMoney(budget0.recommendedMax)}</span></div>
+        <div class="tma-row"><span class="tma-mini">Share of cash above the reserve</span><span class="tma-seg">${[0.1, 0.25, 0.5, 0.75].map(x => `<button class="tma-segbtn${!budget0.custom && Math.abs(budget0.share - x) < 1e-6 ? ' on' : ''}" data-buypct="${x}">${Math.round(x * 100)}%</button>`).join('')}</span></div>
+        <div class="tma-row"><span class="tma-mini">…or an exact amount</span><input type="number" id="tma-buy-budget" min="0" step="1000000" placeholder="${fmtMoney(Math.round(budget0.spendable * budget0.share))}" value="${budget0.custom ? budget0.recommendedMax : ''}" style="width:120px;background:#161a1f;border:1px solid #2b323b80;color:#e6e9ec;border-radius:5px;padding:3px 6px;text-align:right;"></div>` : `<div class="tma-mini">Cash not read yet — open Home or Finances once.</div>`}
         <div class="tma-row"><span>Max age</span><input type="number" id="tma-buy-maxage" min="18" max="40" value="${seniorPrefs.maxAge != null ? seniorPrefs.maxAge : SENIOR_CRITERIA.maxAgeDefault}" style="width:70px;background:#161a1f;border:1px solid #2b323b80;color:#e6e9ec;border-radius:5px;padding:3px 6px;text-align:right;"></div>
         <label class="tma-row" style="cursor:pointer;"><span>Include foreign players</span><input type="checkbox" id="tma-market-foreign" ${seniorPrefs.includeForeign !== false ? 'checked' : ''}></label>
         <button class="tma-btn" id="tma-market-scan">🔎 Scan the transfer market</button>
         <div class="tma-progress" id="tma-market-status">${ms && ms.data ? `${ms.data.unique} listings${buys && buys.A ? ` · ${buys.considered} in budget` : ''}` : ''}</div>
-        <div class="tma-mini" style="margin-top:4px;">Gains are what a player adds to that team's best XI (R5 with TM's position penalty and routine sharing), now → in a year. Budget = a quarter of cash above the wage reserve; players priced over 30% above the market rate for their R5 and age are left out; growth projection by age (own heuristics). Price = the next bid, or his Sell-to-Agent price if higher unless the auction ends within the hour (others will outbid a bargain) — own heuristic. Never bids for you.</div>
+        <div class="tma-mini" style="margin-top:4px;">Gains are what a player adds to that team's best XI (R5 with TM's position penalty and routine sharing), now → in a year. Budget = your chosen share of cash above the wage reserve (or an exact amount); each list holds one player per position; players priced over 30% above the market rate for their R5 and age are left out; growth projection by age (own heuristics). Price = the next bid, or his Sell-to-Agent price if higher unless the auction ends within the hour (others will outbid a bargain) — own heuristic. Never bids for you.</div>
       </div>`;
     body.innerHTML = `
       ${scanHtml}
@@ -5780,6 +5796,10 @@
       renderScouting();
     };
     ['tma-market-foreign', 'tma-buy-maxage'].forEach(id => { const el = document.getElementById(id); if (el) el.addEventListener('change', saveFilters); });
+    const setBudget = patch => { saveShortlistPrefs('senior', { ...loadShortlistPrefs('senior'), ...patch }); buildBuyLists(); renderScouting(); };
+    document.querySelectorAll('[data-buypct]').forEach(b => b.addEventListener('click', () => setBudget({ buyPct: Number(b.dataset.buypct), budget: null })));
+    const be = document.getElementById('tma-buy-budget');
+    if (be) be.addEventListener('change', () => setBudget({ budget: be.value ? Number(be.value) : null }));
     const runScan = async () => {
       const st = document.getElementById('tma-market-status'), btn = document.getElementById('tma-market-scan');
       if (btn) btn.disabled = true;
