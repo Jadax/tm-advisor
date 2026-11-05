@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.30.0
+// @version      3.30.1
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -3194,9 +3194,10 @@
   function ownSquadsWithHistory() {
     const own = (getSlice('ownSquads') || {}).data || {};
     const all = ((getSlice('players') || {}).data) || [];
-    const plotOf = Object.fromEntries(all.map(p => [String(p.id), p.plot]));
+    const byId = Object.fromEntries(all.map(p => [String(p.id), p]));
     const scouted = (getSlice('scoutSummaries') || {}).data || {};
-    const withPlot = list => (list || []).map(p => ({ ...p, plot: p.plot || plotOf[String(p.id)] || null, scout: p.scout || scouted[String(p.id)] || null }));
+    // players_get_select has no wage or TI history; the Players page (players_ar) has both.
+    const withPlot = list => (list || []).map(p => { const x = byId[String(p.id)] || {}; return { ...p, plot: p.plot || x.plot || null, wage: p.wage || x.wage || null, scout: p.scout || scouted[String(p.id)] || null }; });
     return { A: withPlot(own.A), B: withPlot(own.B) };
   }
 
