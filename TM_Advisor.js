@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.36.1
+// @version      3.37.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -2345,6 +2345,7 @@
     return { source: 'best', lineup: best.lineup.filter(l => l.player) };
   }
 
+  const MEASURED_MENTALITY = 5, MEASURED_STYLE = 2; // Slightly Attacking, Direct — see below
   function recommendTacticSettings(myXI, opponent, scouting, expected, opts) {
     // Compare our starting XI's average R5 against the opponent's likely-best-XI average R5.
     // Both sides are now on the same R5 scale (real skills when available via the AJAX
@@ -2493,6 +2494,14 @@
     const oppPlayers = savedXI || (oppXI ? oppXI.lineup.map(l => l.player) : []);
     const predictedGD = predictGoalDiff(model, myXI.lineup.filter(l => l.player).map(l => l.player), oppPlayers, weAreHome);
     let evidence = { n: model.n, ready: model.ready };
+    // Measured default, za top division 2026-11-09 (189 matches): Slightly Attacking + Direct
+    // was the best pair in every situation (+0.55 ±0.17, n129; underdog +1.07). It replaces the
+    // heuristics above; the live evidence below can still move off it when results say so.
+    // Not for the reserves (another league, no evidence model).
+    if (!(opts && opts.noEvidence)) {
+      if (mentality !== MEASURED_MENTALITY || style !== MEASURED_STYLE) reasoning.push(`Measured in the top division: ${MENTALITY[MEASURED_MENTALITY]} + ${ATT_STYLE[MEASURED_STYLE]} beat every other pairing in every situation (+0.55 goals/match vs expectation, 129 sides) → ${MENTALITY[MEASURED_MENTALITY]} / ${ATT_STYLE[MEASURED_STYLE]}.`);
+      mentality = MEASURED_MENTALITY; style = MEASURED_STYLE;
+    }
     if (predictedGD != null) {
       const context = contextOf(predictedGD);
       const m = evidencePick(model, 'ment', context, mentality), st = evidencePick(model, 'style', context, style);
@@ -2565,7 +2574,7 @@
   // teams only (as settingEffects). The meta flag is grouped too, so its claim gets tested.
   function shapeEffects(model, key) {
     const groups = {};
-    model.samples.forEach(x => { const v = x.s[key]; if (v != null && x.team !== clubId) (groups[v] = groups[v] || []).push(x.res); });
+    topSamples(model).forEach(x => { const v = x.s[key]; if (v != null && x.team !== clubId) (groups[v] = groups[v] || []).push(x.res); });
     return Object.entries(groups).map(([v, r]) => {
       const mean = r.reduce((a, b) => a + b, 0) / r.length;
       const sd = Math.sqrt(r.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, r.length - 1));
@@ -4002,7 +4011,7 @@
     games.forEach((m, i) => {
       const p = predict(X[i]), e = y[i] - p;
       sq += e * e;
-      samples.push({ s: m.h, team: m.hid, exp: p, res: e }, { s: m.a, team: m.aid, exp: -p, res: -e }); // a sample per side
+      samples.push({ s: m.h, team: m.hid, exp: p, res: e, lg: m.lg }, { s: m.a, team: m.aid, exp: -p, res: -e, lg: m.lg }); // a sample per side
     });
     // How far OUR results run above/below what our ratings predict. Kept out of the setting
     // effects: we played one setting all season, so our own over-performance would otherwise
@@ -4016,9 +4025,12 @@
   // Own heuristic: within ¾ of a goal either way counts as an even match.
   const contextOf = gd => gd < -0.75 ? 'underdog' : gd > 0.75 ? 'favourite' : 'even';
 
+  // Settings are judged on the top division once it has enough matches: its managers are
+  // active, while lower divisions are full of untouched default tactics.
+  const topSamples = model => { const t = model.samples.filter(x => x.lg === '1.1'); return t.length >= 2 * LEARN_MIN_MATCHES ? t : model.samples; };
   function settingEffects(model, field, context) {
     const groups = {};
-    model.samples.forEach(x => { const v = x.s[field]; if (v && x.team !== clubId && contextOf(x.exp) === context) (groups[v] = groups[v] || []).push(x.res); });
+    topSamples(model).forEach(x => { const v = x.s[field]; if (v && x.team !== clubId && contextOf(x.exp) === context) (groups[v] = groups[v] || []).push(x.res); });
     return Object.entries(groups).map(([v, r]) => {
       const mean = r.reduce((a, b) => a + b, 0) / r.length;
       const sd = Math.sqrt(r.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, r.length - 1));

@@ -46,6 +46,8 @@ No slot is ever left empty (an empty slot can forfeit a match): if a position ha
 
 ### 🧠 Tactics Engine
 
+- **Measured settings** — mentality and attacking style start from what wins in your country's top division: **Slightly Attacking + Direct** (+0.55 goals/match over what strength predicts, best in every situation, 129 sides measured). Results learned before every match can still move it; settings and formations are judged on the top division once it has enough matches, since its managers are active.
+
 - **Formation meta by default, tested by results** — the engine plays **3-1-4-2** (3 DC, DMC, ML, 2 MC, MR, 2 FC — the best-measured shape in the South African top division) by default, or another meta shape (3-2-3-2, 3-2-4-1, 3-3-2-2, 3-5-2) when your squad fits that one clearly better. It only leaves the meta when the meta's best XI is over 8% weaker than your strongest, or when your division's results clearly show the meta doing worse. Before every match it reads the newest results from your division **and your country's top division** (where the most active managers play), with both sides' shapes, and re-fits, so this re-tests itself all season; the Tactics tab shows why the shape was picked and the measured table.
 
 - **Best XI picker** — rates every player in every slot with that slot's own R5 weights, applies TM's own out-of-position penalty (10% per step, read from the game's tactics code), and finds the optimal XI across 11 formations. Tells you when formations are a near-tie, so you know the shape barely matters and who plays where does.
