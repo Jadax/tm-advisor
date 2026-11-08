@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.34.0
+// @version      3.35.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -2601,8 +2601,12 @@
     const metas = all.filter(r => isMetaShape(shapeOf(r.lineup.map(l => l.slot))) && r.totalRec >= top.totalRec * (1 - META_MAX_LOSS));
     let chosen = null, chosenWhy = null;
     if (!metaWorse && metas.length) {
-      const bestMeta = metas[0], pref = metas.find(r => r.formation === META_PREFERRED);
-      chosen = pref && pref.totalRec >= bestMeta.totalRec * 0.98 ? pref : bestMeta;
+      // Among meta shapes within 2% of the strongest one, the best measured (shrunk) result
+      // wins; untested shapes fall back to the user's 3-2-3-2, then raw strength.
+      const bestMeta = metas[0];
+      const close = metas.filter(r => r.totalRec >= bestMeta.totalRec * 0.98).map(r => ({ r, w: worth(r) }));
+      const measured = close.filter(x => /division sides/.test(x.w.why || ''));
+      chosen = measured.length ? measured.sort((x, y) => y.w.v - x.w.v)[0].r : (close.find(x => x.r.formation === META_PREFERRED) || close[0]).r;
       chosenWhy = `the meta (3 DC, 2 DMC/packed midfield, 2 FC — your default${metaTested ? `; division results: ${metaEdge >= 0 ? '+' : ''}${metaEdge.toFixed(2)} goals vs other shapes` : ''})`;
     }
     const window = all.filter(r => r.totalRec >= top.totalRec * (1 - FORMATION_WINDOW)).map(r => ({ r, w: worth(r) }));
@@ -3880,7 +3884,7 @@
    *  associations, and the UI says so.
    * ============================================================ */
 
-  const MATCH_BANK_CAP = 600;
+  const MATCH_BANK_CAP = 1000; // own division + the country's top division
   const LEARN_MIN_MATCHES = 30;  // below this the model isn't fitted at all
   const LEARN_MIN_SAMPLES = 12;  // per setting, per context, before it can override
   const LEARN_CRAWL_GAP_MS = 20 * 3600e3;
@@ -3914,10 +3918,17 @@
     const path = home && home.data && home.data.nextMatch && home.data.nextMatch.leaguePath;
     const lp = path && path.match(/\/league\/([a-z]+)\/(\d+)\/(\d+)/i);
     if (!lp) throw new Error('league unknown — open the Home page once');
-    const res = await fetch('/ajax/fixtures.ajax.php', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `type=league&var1=${lp[1]}&var2=${lp[2]}&var3=${lp[3]}` });
-    const fx = JSON.parse(await res.text()) || {};
+    // Your division plus your country's top division (user, 2026-11-08): the most active
+    // managers play there, so it shows best what the match engine rewards.
+    const leagues = [[lp[1], lp[2], lp[3]]];
+    if (!(lp[2] === '1' && lp[3] === '1')) leagues.push([lp[1], '1', '1']);
     const played = [];
-    Object.values(fx).forEach(mo => (mo && mo.matches || []).forEach(x => { if (x.result && /^\d+-\d+$/.test(x.result)) played.push(x); }));
+    for (const [c, dv, g] of leagues) {
+      const res = await fetch('/ajax/fixtures.ajax.php', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `type=league&var1=${c}&var2=${dv}&var3=${g}` });
+      const fx = JSON.parse(await res.text()) || {};
+      Object.values(fx).forEach(mo => (mo && mo.matches || []).forEach(x => { if (x.result && /^\d+-\d+$/.test(x.result)) played.push({ ...x, lg: `${dv}.${g}` }); }));
+    }
+    played.sort((a, b) => String(b.date).localeCompare(String(a.date))); // newest first, both leagues
     const bank = (getSlice('matchBank') || { data: {} }).data || {};
     // Entries crawled before shapes were recorded are read again (once).
     const todo = played.filter(x => !bank[x.id] || (!bank[x.id].skip && bank[x.id].h && bank[x.id].h.shape == null)).slice(0, maxNew);
@@ -3931,7 +3942,7 @@
         const h = matchSide(md, data && data.lineup && data.lineup.home, 'home');
         const a = matchSide(md, data && data.lineup && data.lineup.away, 'away');
         bank[x.id] = (h.n >= 9 && a.n >= 9 && h.rec && a.rec)
-          ? { d: x.date, hid: String(x.hometeam), aid: String(x.awayteam), h: { ...h, g: hg }, a: { ...a, g: ag } }
+          ? { d: x.date, lg: x.lg, hid: String(x.hometeam), aid: String(x.awayteam), h: { ...h, g: hg }, a: { ...a, g: ag } }
           : { d: x.date, skip: true };
       } catch (e) { console.warn('TM Advisor: match crawl failed', x.id, e); }
       await sleep(150);
@@ -5489,7 +5500,7 @@
     const graded = gradedPredictions().slice(0, 5);
     const learnHtml = `
       <div class="tma-card">
-        <h4>What the results say <span class="tma-badge">${ev.n || 0} division matches</span></h4>
+        <h4>What the results say <span class="tma-badge">${ev.n || 0} league matches · your division + top division</span></h4>
         ${!ev.ready ? `<div class="tma-mini">Needs ${LEARN_MIN_MATCHES}+ played matches from your division before it judges anything — until then mentality and style above are heuristics.</div>` : `
           <div class="tma-mini" style="margin-bottom:6px;">Fitted on your division: +1★ of average XI rating ≈ ${signed(ev.coef[1])} goals, home ≈ ${signed(ev.coef[0])}, typical miss ±${ev.rmse.toFixed(1)} goals.${ev.teamFactor && ev.teamFactor.n ? ` You've played ${signed(ev.teamFactor.raw)} goals/match vs your ratings (${ev.teamFactor.n} matches; ${signed(ev.teamFactor.shrunk)} counted).` : ''}</div>
           ${settings.predictedGD != null ? `<div class="tma-row"><span>Expected (strength only, ${settings.weAreHome ? 'home' : 'away'})</span><span class="tma-goodval">${signed(settings.predictedGD)} goals · ${ev.context}</span></div>` : ''}
