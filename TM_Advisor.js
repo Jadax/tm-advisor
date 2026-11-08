@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.33.0
+// @version      3.33.1
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -2573,7 +2573,10 @@
   // What a shape is worth: its measured effect once n ≥ LEARN_MIN_SAMPLES, else for meta
   // shapes the user/forum-reported edge (META_PRIOR_GOALS — a heuristic prior) — and none at
   // all once the results show the meta isn't ahead.
-  const FORMATION_WINDOW = 0.03, META_PRIOR_GOALS = 0.15;
+  // Measured shape effects are shrunk toward 0 by n/(n + SHAPE_SHRINK): results miss the
+  // strength model by ±2.3 goals (live, 180 division matches), so 18 lucky matches of 4-5-1
+  // (+1.21 ±0.88) mustn't decide the formation on their own. k is a heuristic.
+  const FORMATION_WINDOW = 0.03, META_PRIOR_GOALS = 0.15, SHAPE_SHRINK = 30;
   function chooseFormation(players, boost) {
     players.forEach(ensureR5);
     const all = Object.keys(FORMATIONS).map(key => pickBestXI(players, key, boost)).sort((a, b) => b.totalRec - a.totalRec);
@@ -2583,10 +2586,11 @@
     const metaRows = model.ready ? shapeEffects(model, 'meta') : [];
     const metaYes = metaRows.find(r => r.value === 'true'), metaNo = metaRows.find(r => r.value === 'false');
     const metaTested = metaYes && metaNo && metaYes.n >= LEARN_MIN_SAMPLES && metaNo.n >= LEARN_MIN_SAMPLES;
-    const metaEdge = metaTested ? metaYes.mean - metaNo.mean : META_PRIOR_GOALS;
+    const metaN = metaTested ? Math.min(metaYes.n, metaNo.n) : 0;
+    const metaEdge = metaTested ? (metaYes.mean - metaNo.mean) * metaN / (metaN + SHAPE_SHRINK) : META_PRIOR_GOALS;
     const worth = r => {
       const sh = shapeOf(r.lineup.map(l => l.slot)), label = shapeLabel(sh), row = shapeRows.find(x => x.value === label);
-      if (row && row.n >= LEARN_MIN_SAMPLES) return { v: row.mean, why: `${label}: ${row.mean >= 0 ? '+' : ''}${row.mean.toFixed(2)} goals vs expectation in ${row.n} division sides` };
+      if (row && row.n >= LEARN_MIN_SAMPLES) { const v = row.mean * row.n / (row.n + SHAPE_SHRINK); return { v, why: `${label}: ${row.mean >= 0 ? '+' : ''}${row.mean.toFixed(2)} ±${row.se.toFixed(2)} goals vs expectation in ${row.n} division sides (counted as ${v >= 0 ? '+' : ''}${v.toFixed(2)})` }; }
       return isMetaShape(sh) ? { v: Math.max(0, metaEdge), why: metaTested ? `3 DC + 2 FC shapes: ${metaEdge >= 0 ? '+' : ''}${metaEdge.toFixed(2)} goals vs the rest in your division (${metaYes.n} sides)` : 'the 3 DC + 2 FC meta (user/forum-reported — a heuristic until your division has enough results to test it)' } : { v: 0, why: null };
     };
     const window = all.filter(r => r.totalRec >= top.totalRec * (1 - FORMATION_WINDOW)).map(r => ({ r, w: worth(r) }));
