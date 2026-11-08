@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.33.1
+// @version      3.34.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -2577,6 +2577,7 @@
   // strength model by ±2.3 goals (live, 180 division matches), so 18 lucky matches of 4-5-1
   // (+1.21 ±0.88) mustn't decide the formation on their own. k is a heuristic.
   const FORMATION_WINDOW = 0.03, META_PRIOR_GOALS = 0.15, SHAPE_SHRINK = 30;
+  const META_PREFERRED = '3-2-3-2', META_MAX_LOSS = 0.08; // user's named shape; loss cap is a heuristic
   function chooseFormation(players, boost) {
     players.forEach(ensureR5);
     const all = Object.keys(FORMATIONS).map(key => pickBestXI(players, key, boost)).sort((a, b) => b.totalRec - a.totalRec);
@@ -2593,12 +2594,24 @@
       if (row && row.n >= LEARN_MIN_SAMPLES) { const v = row.mean * row.n / (row.n + SHAPE_SHRINK); return { v, why: `${label}: ${row.mean >= 0 ? '+' : ''}${row.mean.toFixed(2)} ±${row.se.toFixed(2)} goals vs expectation in ${row.n} division sides (counted as ${v >= 0 ? '+' : ''}${v.toFixed(2)})` }; }
       return isMetaShape(sh) ? { v: Math.max(0, metaEdge), why: metaTested ? `3 DC + 2 FC shapes: ${metaEdge >= 0 ? '+' : ''}${metaEdge.toFixed(2)} goals vs the rest in your division (${metaYes.n} sides)` : 'the 3 DC + 2 FC meta (user/forum-reported — a heuristic until your division has enough results to test it)' } : { v: 0, why: null };
     };
+    // User rule (2026-11-08): the meta is the default — 3-2-3-2 first, another meta shape if
+    // the squad fits it clearly better — unless it costs over META_MAX_LOSS of raw strength or
+    // the division's results clearly show the meta doing worse (auto-learned, 1.5 SE).
+    const metaWorse = metaTested && (metaYes.mean - metaNo.mean) < -1.5 * Math.sqrt(metaYes.se ** 2 + metaNo.se ** 2);
+    const metas = all.filter(r => isMetaShape(shapeOf(r.lineup.map(l => l.slot))) && r.totalRec >= top.totalRec * (1 - META_MAX_LOSS));
+    let chosen = null, chosenWhy = null;
+    if (!metaWorse && metas.length) {
+      const bestMeta = metas[0], pref = metas.find(r => r.formation === META_PREFERRED);
+      chosen = pref && pref.totalRec >= bestMeta.totalRec * 0.98 ? pref : bestMeta;
+      chosenWhy = `the meta (3 DC, 2 DMC/packed midfield, 2 FC — your default${metaTested ? `; division results: ${metaEdge >= 0 ? '+' : ''}${metaEdge.toFixed(2)} goals vs other shapes` : ''})`;
+    }
     const window = all.filter(r => r.totalRec >= top.totalRec * (1 - FORMATION_WINDOW)).map(r => ({ r, w: worth(r) }));
     const pickW = window.sort((a, b) => b.w.v - a.w.v || b.r.totalRec - a.r.totalRec)[0];
-    const chosen = pickW.w.v > 0 ? pickW.r : top;
+    if (!chosen) { chosen = pickW.w.v > 0 ? pickW.r : top; chosenWhy = pickW.w.why; }
+    if (metaWorse) chosenWhy = `the meta is clearly behind in your division's results, so the strongest shape is used${chosenWhy ? ' — ' + chosenWhy : ''}`;
     chosen.alternatives = all.filter(r => r !== chosen && r.totalRec >= top.totalRec * 0.99).map(r => r.formation);
     chosen.shape = shapeLabel(shapeOf(chosen.lineup.map(l => l.slot)));
-    chosen.why = chosen !== top ? `${chosen.formation} over ${top.formation} (${((1 - chosen.totalRec / top.totalRec) * 100).toFixed(1)}% less raw strength): ${pickW.w.why}` : null;
+    chosen.why = chosen !== top ? `${chosen.formation} over ${top.formation} (${((1 - chosen.totalRec / top.totalRec) * 100).toFixed(1)}% less raw strength): ${chosenWhy}` : (chosenWhy && isMetaShape(shapeOf(chosen.lineup.map(l => l.slot))) ? `${chosen.formation}: ${chosenWhy}` : null);
     chosen.shapeRows = shapeRows; chosen.metaRows = metaRows;
     return chosen;
   }
