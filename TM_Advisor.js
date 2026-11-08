@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.36.0
+// @version      3.36.1
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -2071,7 +2071,10 @@
     '5-4-1': 'gk dl dcl dc dcr dr ml mcl mcr mr fc',
     // Current meta per the user and TM forum posters: three central defenders, two DMCs or a
     // packed midfield, two forwards — plus the 4-5-1 (OMC) shape cited as its counter.
-    '3-2-3-2': 'gk dcl dc dcr dmcl dmcr mcl mc mcr fcl fcr',
+    // Measured, za top division 2026-11-09 (189 matches): 3-2-3-2 with ML/MR +0.28 (n82); with
+    // three central MCs −1.14 (n7) — the wide players are what make it work.
+    '3-2-3-2': 'gk dcl dc dcr dmcl dmcr ml mc mr fcl fcr',
+    '3-1-4-1-1': 'gk dcl dc dcr dmc ml mcl mcr mr omc fc',
     '3-2-4-1': 'gk dcl dc dcr dmcl dmcr ml mcl mcr mr fc',
     '3-3-2-2': 'gk dcl dc dcr dml dmc dmr mcl mcr fcl fcr',
     '4-4-1-1': 'gk dl dcl dcr dr ml mcl mcr mr omc fc',
