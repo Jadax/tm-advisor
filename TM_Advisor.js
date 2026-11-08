@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.37.0
+// @version      3.38.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -3142,6 +3142,11 @@
   const BUY_LIST_LEN = 8;
   const BUY_VALUE_MIN_SCORE = 8;
   const MIN_LINEUP_R5 = 75; // user: no starter below R5 75
+  // Roundedness rules (user: higher SI with a high R5 is always better). Heuristics: out under
+  // 90% of the typical skill total for his R5 (live: R5 77-79 on SI ~25k read −12%/−13%);
+  // ranking tilted ±2% per 1% above/below, capped at ±20%.
+  const BUY_MIN_ROUNDED = 0.9;
+  const roundBoost = rd => rd == null ? 1 : Math.max(0.8, Math.min(1.2, 1 + 2 * (rd - 1)));
   const BUY_OVERPRICE = 1.3; // heuristic: more than 30% over the market rate for his R5 and age is out // heuristic: value buys must still be a real upgrade, not +1 for nothing
   const PROJECT_YEARS = 1;
   // Growth projection, from YOUR club's measured training (so it reflects your training
@@ -3376,7 +3381,7 @@
         price, minBid: minPrice(c), ends: c.ends || null, estValue: sta, fair: fairPrice(c), scout: c.scout || null, maxValue: c.asi != null && ageMonths ? calcMaxSellPrice(Number(c.asi), ageMonths, sta) : null,
         gain: Number(j.now.gain.toFixed(1)), gainNext: Number(j.next.gain.toFixed(1)), slot: j.now.slot, replaces: j.now.replaces,
         pace: c.age < 26 ? Math.round(seasonGain(c, c.age, wageTi(c))) : null, ti: wageTi(c), peak: peakProjection(c),
-        score: Number(score.toFixed(1)), perM: score / Math.max(0.1, price / 1e6), steal: sta != null && minPrice(c) < sta * 0.85 && !!c.ends && c.ends - now() < 3600e3 };
+        rounded: rounded(c), score: Number((score * roundBoost(rounded(c))).toFixed(1)), perM: score * roundBoost(rounded(c)) / Math.max(0.1, price / 1e6), steal: sta != null && minPrice(c) < sta * 0.85 && !!c.ends && c.ends - now() < 3600e3 };
     };
     const lists = (rows, ctx) => {
       // One per position (the starter he'd replace), nobody in both lists.
@@ -3407,6 +3412,20 @@
       return b ? { b, n } : null;
     })();
     const fairPrice = c => fit ? Math.exp(fit.b[0] + fit.b[1] * Number(c._r5) + fit.b[2] * Number(c.age)) : null;
+    // Roundedness (user rule 2026-11-09): total skill points (from SI, skillSumFromSI) against
+    // what players of the same R5 typically have in this market. Every skill plays in a match
+    // (guide: "all players use all skills to some extent"), so a top R5 from a few key skills
+    // on a low SI is a narrower player. Fitted per GK / outfield; thresholds are heuristics.
+    // Compared with market players of nearly the same R5 (±3, widened to ±6 when thin): a
+    // straight-line fit marked every top-R5 player down (live: most of the top read −8%).
+    const roundPts = { gk: [], out: [] };
+    pool.forEach(c => { const isGK = bucketFor(c.fp) === 'GK', sum = skillSumFromSI(Number(c.asi), isGK); if (sum && isFinite(c._r5)) roundPts[isGK ? 'gk' : 'out'].push([Number(c._r5), sum]); });
+    const rounded = c => {
+      const isGK = bucketFor(c.fp) === 'GK', sum = skillSumFromSI(Number(c.asi), isGK), r = Number(c._r5), pts = roundPts[isGK ? 'gk' : 'out'];
+      if (!sum || !isFinite(r)) return null;
+      for (const w of [3, 6]) { const near = pts.filter(x => Math.abs(x[0] - r) <= w).map(x => x[1]); if (near.length >= 8) return sum / median(near); }
+      return null;
+    };
     // User rules: every first-team buy is at least R5 75 — or, while still growing (< 24),
     // projected to reach 75 next season; youth (≤ 21) are bought for the reserves to develop,
     // judged by where they'll be at 27, not by today's XI.
@@ -3418,12 +3437,14 @@
     pool.forEach(c => {
       const fair = fairPrice(c);
       if (fair != null && likelyPrice(c) > fair * BUY_OVERPRICE) return; // pays well over the going rate
+      const rd = rounded(c);
+      if (rd != null && rd < BUY_MIN_ROUNDED) return; // R5 from a few skills on a thin SI
       if (seniorOk(c)) { const ja = judge(c, ctxA); if (ja) { rowsA.push(row(c, ja, 1)); return; } }
       if (c.age < RESERVE_MAX_AGE + 1) {
         const pk = peakProjection(c);
         if (pk == null || pk < prospectBar) return;
         const r = row(c, { now: { gain: 0, slot: null, replaces: null }, next: { gain: 0 } }, 0);
-        r.score = Number((pk - prospectBar).toFixed(1)); r.perM = r.score / Math.max(0.1, r.price / 1e6);
+        r.score = Number(((pk - prospectBar) * roundBoost(r.rounded)).toFixed(1)); r.perM = r.score / Math.max(0.1, r.price / 1e6);
         rowsY.push(r);
       }
     });
@@ -5838,7 +5859,7 @@
     const buyRow = r => `
       <div class="tma-buy">
         <div class="tma-row"><span><a href="${playerLink(r)}" target="_blank" style="color:#79a8d6;text-decoration:none;font-weight:600;">${esc(r.name)} ↗</a>${r.steal ? ' <span class="tma-badge" title="Ends within the hour at a bid below his Sell-to-Agent price — you could sell him straight back to the agent for more">steal</span>' : ''}${natBadge(r)}</span><span class="tma-goodval" title="${r.slot ? 'What he adds to your XI now → in a year' : 'Projected R5 at ' + projectionAge()}">${r.slot ? '+' + r.gain.toFixed(1) + ' → +' + r.gainNext.toFixed(1) : 'R5 ' + r.r5.toFixed(1) + ' → ' + (r.peak != null ? r.peak.toFixed(1) : '?')}</span></div>
-        <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.routine != null ? ' · Rou ' + r.routine.toFixed(1) : ''}${r.ti != null ? ' · training TI ' + r.ti.toFixed(1) + '/wk' : ''}${r.pace ? ' · ~' + r.pace + ' skill pts next season' : ''}${r.peak != null ? ' · R5 at ' + projectionAge() + ' ≈ ' + r.peak.toFixed(1) : ''}</div>
+        <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.asi ? ' · SI ' + Number(r.asi).toLocaleString() : ''}${r.rounded != null ? ` · <span style="color:${r.rounded >= 1.05 ? 'var(--tma-lime)' : r.rounded < 0.95 ? 'var(--tma-amber)' : 'inherit'};" title="Total skill points vs what players of his R5 typically have on the market">${r.rounded >= 1 ? '+' : ''}${Math.round((r.rounded - 1) * 100)}% rounded</span>` : ''}${r.routine != null ? ' · Rou ' + r.routine.toFixed(1) : ''}${r.ti != null ? ' · training TI ' + r.ti.toFixed(1) + '/wk' : ''}${r.pace ? ' · ~' + r.pace + ' skill pts next season' : ''}${r.peak != null ? ' · R5 at ' + projectionAge() + ' ≈ ' + r.peak.toFixed(1) : ''}</div>
         ${r.scout ? `<div class="tma-mini">🔍 Scouted${r.scout.potential != null ? ' · potential ' + r.scout.potential + '/20' : ''}${r.scout.dev ? ' · development ' + esc(r.scout.dev) : ''}${r.scout.peaks ? ' · peaks ' + ['phy', 'tac', 'tec'].map(k => (r.scout.peaks[k] || '?')).join('/') + ' (phy/tac/tec of 4)' : ''}</div>` : ''}
         <div class="tma-mini">${r.slot ? `Starts at <b>${esc(String(r.slot).toUpperCase())}</b>${r.replaces ? ' for ' + esc(r.replaces) : ''} · ` : ''}next bid ${fmtMoney(r.minBid)}${r.price > r.minBid ? ' · likely <b>' + fmtMoney(r.price) + '</b>' : ''}${r.fair ? ' · market rate ' + fmtMoney(Math.round(r.fair)) : ''}${r.ends ? ' · ends ' + endsIn(r.ends) : ''}${r.wage ? ' · wage ' + fmtMoney(r.wage) + '/wk' : ''}</div>
       </div>`;
