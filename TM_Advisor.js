@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.35.0
+// @version      3.36.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -2577,7 +2577,9 @@
   // strength model by ±2.3 goals (live, 180 division matches), so 18 lucky matches of 4-5-1
   // (+1.21 ±0.88) mustn't decide the formation on their own. k is a heuristic.
   const FORMATION_WINDOW = 0.03, META_PRIOR_GOALS = 0.15, SHAPE_SHRINK = 30;
-  const META_PREFERRED = '3-2-3-2', META_MAX_LOSS = 0.08; // user's named shape; loss cap is a heuristic
+  // 3-1-4-2 (DMC, ML, 2 MC, MR): user's pick 2026-11-09, and its group measured best in the za
+  // top division (+0.22 ±0.20, n125). Loss cap is a heuristic.
+  const META_PREFERRED = '3-1-4-2', META_MAX_LOSS = 0.08;
   function chooseFormation(players, boost) {
     players.forEach(ensureR5);
     const all = Object.keys(FORMATIONS).map(key => pickBestXI(players, key, boost)).sort((a, b) => b.totalRec - a.totalRec);
@@ -3891,11 +3893,14 @@
 
   // A side's shape from its starters' slots: central D, wide D, DM, M, OM, F.
   function shapeOf(slots) {
-    const c = { dc: 0, dw: 0, dm: 0, m: 0, om: 0, f: 0 };
-    slots.forEach(k => { k = String(k).toLowerCase(); if (k === 'gk') return; if (/^dc[lr]?$/.test(k)) c.dc++; else if (/^d[lr]$/.test(k)) c.dw++; else if (/^dm/.test(k)) c.dm++; else if (/^om/.test(k)) c.om++; else if (/^m/.test(k)) c.m++; else if (/^f/.test(k)) c.f++; });
+    const c = { dc: 0, dw: 0, dm: 0, m: 0, mw: 0, om: 0, f: 0 };
+    slots.forEach(k => { k = String(k).toLowerCase(); if (k === 'gk') return; if (/^dc[lr]?$/.test(k)) c.dc++; else if (/^d[lr]$/.test(k)) c.dw++; else if (/^dm/.test(k)) c.dm++; else if (/^om/.test(k)) c.om++; else if (/^m/.test(k)) { c.m++; if (/^m[lr]$/.test(k)) c.mw++; } else if (/^f/.test(k)) c.f++; });
     return c;
   }
-  const shapeLabel = c => `${c.dc + c.dw}-${c.dm + c.m + c.om}-${c.f}${c.dm ? ` (${c.dm} DM)` : ''}${c.dw === 0 && c.dc >= 3 ? ' · 3 DC' : ''}`;
+  // TM-style notation, lines without players dropped (3-1-4-2, 3-2-3-2, 4-4-2), plus how many
+  // of the midfielders are wide — "DMC, ML, 2 MC, MR" and "DMC, 4 MC" are different shapes.
+  const shapeLabel = c => [c.dc + c.dw, c.dm, c.m, c.om, c.f].filter((v, i) => v || i === 0 || i === 4).join('-') + (c.m ? ` (${c.mw} wide)` : '');
+  const SHAPE_V = 2; // bump when shapeLabel changes: the crawl re-reads older entries
   // The meta the user reports: 3+ central defenders, no full-backs, 2 forwards, 4+ in midfield.
   const isMetaShape = c => c.dc >= 3 && c.dw === 0 && c.f >= 2 && c.dm + c.m + c.om >= 4;
   function matchSide(md, lineup, side) {
@@ -3904,7 +3909,7 @@
     const avg = k => starters.length ? starters.reduce((a, p) => a + (parseFloat(p[k]) || 0), 0) / starters.length : null;
     const pick = k => { const v = md[k]; const x = v && typeof v === 'object' ? v[side] : null; return x == null || x === '' ? null : Number(x); };
     const style = pick('attacking_style');
-    return { n: starters.length, rec: avg('rec'), rou: avg('routine'), ment: pick('mentality'), style: style === 0 ? 1 : style, focus: pick('focus_side'), shape: shapeLabel(shape), meta: isMetaShape(shape) }; // style 0 = Balanced, as fetchNextMatchExpected treats it
+    return { n: starters.length, rec: avg('rec'), rou: avg('routine'), ment: pick('mentality'), style: style === 0 ? 1 : style, focus: pick('focus_side'), shape: shapeLabel(shape), shapeV: SHAPE_V, meta: isMetaShape(shape) }; // style 0 = Balanced, as fetchNextMatchExpected treats it
   }
 
   let crawling = false;
@@ -3931,7 +3936,7 @@
     played.sort((a, b) => String(b.date).localeCompare(String(a.date))); // newest first, both leagues
     const bank = (getSlice('matchBank') || { data: {} }).data || {};
     // Entries crawled before shapes were recorded are read again (once).
-    const todo = played.filter(x => !bank[x.id] || (!bank[x.id].skip && bank[x.id].h && bank[x.id].h.shape == null)).slice(0, maxNew);
+    const todo = played.filter(x => !bank[x.id] || (!bank[x.id].skip && bank[x.id].h && bank[x.id].h.shapeV !== SHAPE_V)).slice(0, maxNew);
     let done = 0;
     for (const x of todo) {
       onProgress && onProgress(++done, todo.length);
@@ -3949,7 +3954,7 @@
     }
     Object.keys(bank).sort((p, q) => String(bank[q].d).localeCompare(String(bank[p].d))).slice(MATCH_BANK_CAP).forEach(id => delete bank[id]);
     setSlice('matchBank', bank);
-    return { added: todo.length, total: Object.keys(bank).length, remaining: played.filter(x => !bank[x.id] || (!bank[x.id].skip && bank[x.id].h && bank[x.id].h.shape == null)).length };
+    return { added: todo.length, total: Object.keys(bank).length, remaining: played.filter(x => !bank[x.id] || (!bank[x.id].skip && bank[x.id].h && bank[x.id].h.shapeV !== SHAPE_V)).length };
   }
 
   // Daily, read-only, capped: the bank grows by itself whenever you play.
