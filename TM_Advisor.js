@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.31.0
+// @version      3.33.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -1998,6 +1998,7 @@
         <div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0;font-size:15px;font-weight:700;">
           <span>${esc(H.club_name || 'Home')}</span><span style="font-size:20px;color:#7fb2e0;">${a.score.home} – ${a.score.away}</span><span>${esc(A.club_name || 'Away')}</span>
         </div>
+        ${(() => { const md = match.match_data || {}; const sd = side => { const st = Object.values((match.lineup || {})[side] || {}).filter(x => x && x.position && !String(x.position).includes('sub')); const pk = k => md[k] && typeof md[k] === 'object' ? md[k][side] : null; const rec = st.length ? st.reduce((a, x) => a + (parseFloat(x.rec) || 0), 0) / st.length : null; return `${esc(shapeLabel(shapeOf(st.map(x => x.position))))}${rec ? ' · ' + rec.toFixed(2) + '★' : ''}${pk('mentality') != null ? ' · ' + esc(MENTALITY[Number(pk('mentality'))] || '') : ''}${pk('attacking_style') != null ? ' / ' + esc(ATT_STYLE[Number(pk('attacking_style')) || 1] || '') : ''}`; }; return `<div style="display:flex;justify-content:space-between;color:#8a939c;margin-bottom:6px;"><span>${sd('home')}</span><span style="text-align:right;">${sd('away')}</span></div>`; })()}
         ${pred ? `<div style="text-align:center;color:#8a939c;margin-bottom:6px;">TM Advisor predicted ${pred.gd >= 0 ? '+' : ''}${pred.gd.toFixed(1)} goals for us</div>` : ''}
         <table style="width:100%;border-collapse:collapse;">
           ${row('Possession %', 'possession')}${row('Shots', 'shots')}${row('On target', 'shotsOnTarget')}${row('Set pieces', 'setPieces')}${row('Penalties', 'penalties')}${row('Yellow cards', 'yellows')}${row('Red cards', 'reds')}
@@ -2068,6 +2069,12 @@
     '3-1-4-2': 'gk dcl dc dcr dmc ml mcl mcr mr fcl fcr',
     '5-3-2': 'gk dl dcl dc dcr dr mcl mc mcr fcl fcr',
     '5-4-1': 'gk dl dcl dc dcr dr ml mcl mcr mr fc',
+    // Current meta per the user and TM forum posters: three central defenders, two DMCs or a
+    // packed midfield, two forwards — plus the 4-5-1 (OMC) shape cited as its counter.
+    '3-2-3-2': 'gk dcl dc dcr dmcl dmcr mcl mc mcr fcl fcr',
+    '3-2-4-1': 'gk dcl dc dcr dmcl dmcr ml mcl mcr mr fc',
+    '3-3-2-2': 'gk dcl dc dcr dml dmc dmr mcl mcr fcl fcr',
+    '4-4-1-1': 'gk dl dcl dcr dr ml mcl mcr mr omc fc',
   };
   // TM's position number per slot key (the tactics page's `position_key`).
   const SLOT_NUM = { gk: 0, dl: 1, dcl: 2, dc: 3, dcr: 4, dr: 5, dml: 6, dmcl: 7, dmc: 8, dmcr: 9, dmr: 10,
@@ -2551,9 +2558,49 @@
   // built in one place, so roles and orders can never be picked for a different XI.
   // opts.restBanRisk leaves out players one yellow card from a ban (tactics-page squads only
   // carry that flag) — a per-match call: today's points vs a ban for the next fixture.
+  // Shape effects from results: goals vs the strength model's expectation, per shape, other
+  // teams only (as settingEffects). The meta flag is grouped too, so its claim gets tested.
+  function shapeEffects(model, key) {
+    const groups = {};
+    model.samples.forEach(x => { const v = x.s[key]; if (v != null && x.team !== clubId) (groups[v] = groups[v] || []).push(x.res); });
+    return Object.entries(groups).map(([v, r]) => {
+      const mean = r.reduce((a, b) => a + b, 0) / r.length;
+      const sd = Math.sqrt(r.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, r.length - 1));
+      return { value: v, n: r.length, mean, se: sd / Math.sqrt(r.length) };
+    }).sort((a, b) => b.mean - a.mean);
+  }
+  // Formation: the strongest XI, unless a shape within FORMATION_WINDOW of it is worth more.
+  // What a shape is worth: its measured effect once n ≥ LEARN_MIN_SAMPLES, else for meta
+  // shapes the user/forum-reported edge (META_PRIOR_GOALS — a heuristic prior) — and none at
+  // all once the results show the meta isn't ahead.
+  const FORMATION_WINDOW = 0.03, META_PRIOR_GOALS = 0.15;
+  function chooseFormation(players, boost) {
+    players.forEach(ensureR5);
+    const all = Object.keys(FORMATIONS).map(key => pickBestXI(players, key, boost)).sort((a, b) => b.totalRec - a.totalRec);
+    const top = all[0];
+    const model = fitResultModel();
+    const shapeRows = model.ready ? shapeEffects(model, 'shape') : [];
+    const metaRows = model.ready ? shapeEffects(model, 'meta') : [];
+    const metaYes = metaRows.find(r => r.value === 'true'), metaNo = metaRows.find(r => r.value === 'false');
+    const metaTested = metaYes && metaNo && metaYes.n >= LEARN_MIN_SAMPLES && metaNo.n >= LEARN_MIN_SAMPLES;
+    const metaEdge = metaTested ? metaYes.mean - metaNo.mean : META_PRIOR_GOALS;
+    const worth = r => {
+      const sh = shapeOf(r.lineup.map(l => l.slot)), label = shapeLabel(sh), row = shapeRows.find(x => x.value === label);
+      if (row && row.n >= LEARN_MIN_SAMPLES) return { v: row.mean, why: `${label}: ${row.mean >= 0 ? '+' : ''}${row.mean.toFixed(2)} goals vs expectation in ${row.n} division sides` };
+      return isMetaShape(sh) ? { v: Math.max(0, metaEdge), why: metaTested ? `3 DC + 2 FC shapes: ${metaEdge >= 0 ? '+' : ''}${metaEdge.toFixed(2)} goals vs the rest in your division (${metaYes.n} sides)` : 'the 3 DC + 2 FC meta (user/forum-reported — a heuristic until your division has enough results to test it)' } : { v: 0, why: null };
+    };
+    const window = all.filter(r => r.totalRec >= top.totalRec * (1 - FORMATION_WINDOW)).map(r => ({ r, w: worth(r) }));
+    const pickW = window.sort((a, b) => b.w.v - a.w.v || b.r.totalRec - a.r.totalRec)[0];
+    const chosen = pickW.w.v > 0 ? pickW.r : top;
+    chosen.alternatives = all.filter(r => r !== chosen && r.totalRec >= top.totalRec * 0.99).map(r => r.formation);
+    chosen.shape = shapeLabel(shapeOf(chosen.lineup.map(l => l.slot)));
+    chosen.why = chosen !== top ? `${chosen.formation} over ${top.formation} (${((1 - chosen.totalRec / top.totalRec) * 100).toFixed(1)}% less raw strength): ${pickW.w.why}` : null;
+    chosen.shapeRows = shapeRows; chosen.metaRows = metaRows;
+    return chosen;
+  }
   function buildMatchPlan(squad, opponent, scouting, expected, opts) {
     const players = squad.filter(p => (!p.ban || p.ban === '0') && !p.inj && !(opts && opts.restBanRisk && p.banRisk));
-    const best = bestFormation(players, opts && opts.boost);
+    const best = chooseFormation(players, opts && opts.boost);
     const settings = recommendTacticSettings(best, opponent, scouting, expected, opts);
     const starters = best.lineup.filter(l => l.player).map(l => l.player);
     const ids = new Set(starters.map(p => p.id));
@@ -3170,10 +3217,16 @@
   }
   // R5 at his last pre-decline age (27: TI drops to 1 then, decline from 28 — TM guide).
   const PEAK_AGE = 27;
-  function peakProjection(p) {
-    const age = Number(p.age) || 0;
-    if (age < 15 || age >= PEAK_AGE) return null; // unknown age would project a career from birth
-    const q = projectPlayer({ ...p }, Math.max(1, Math.round(PEAK_AGE - age)));
+  // Horizon = the Max age you buy up to (user): "R5 at 30" for a 30 cap, decline included —
+  // beyond 27 your club's measured TI (negative from ~30) takes over. Default PEAK_AGE.
+  function projectionAge() {
+    const a = Number(loadShortlistPrefs('senior').maxAge);
+    return a >= 18 && a <= 40 ? a : PEAK_AGE;
+  }
+  function peakProjection(p, toAge) {
+    const age = Number(p.age) || 0, target = toAge || projectionAge();
+    if (age < 15 || age >= target) return null; // unknown age would project a career from birth
+    const q = projectPlayer({ ...p }, Math.max(1, Math.round(target - age)));
     return q && q._r5 != null ? Number(Number(q._r5).toFixed(1)) : null;
   }
   function teamContext(squad) {
@@ -3230,7 +3283,7 @@
         if (loss >= SENIOR_CRITERIA.minXiGain) keep = `starts (${loss.toFixed(1)} R5 points lost without him)`;
       }
       if (!keep && team === 'A' && bench.has(id)) keep = 'on the bench';
-      if (!keep && age < 24 && peak != null && peak >= bar) keep = `prospect — projected R5 ${peak.toFixed(1)} at ${PEAK_AGE}`;
+      if (!keep && age < 24 && peak != null && peak >= bar) keep = `prospect — projected R5 ${peak.toFixed(1)} at ${projectionAge()}`;
       if (!keep && team === 'B' && bXi.has(id) && age < RESERVE_MAX_AGE + 1) keep = 'youth starting for the reserves';
       const why = keep ? null : [
         team === 'A' ? 'not in your XI or bench' : 'not developing toward the first team',
@@ -3815,12 +3868,22 @@
   const LEARN_MIN_SAMPLES = 12;  // per setting, per context, before it can override
   const LEARN_CRAWL_GAP_MS = 20 * 3600e3;
 
+  // A side's shape from its starters' slots: central D, wide D, DM, M, OM, F.
+  function shapeOf(slots) {
+    const c = { dc: 0, dw: 0, dm: 0, m: 0, om: 0, f: 0 };
+    slots.forEach(k => { k = String(k).toLowerCase(); if (k === 'gk') return; if (/^dc[lr]?$/.test(k)) c.dc++; else if (/^d[lr]$/.test(k)) c.dw++; else if (/^dm/.test(k)) c.dm++; else if (/^om/.test(k)) c.om++; else if (/^m/.test(k)) c.m++; else if (/^f/.test(k)) c.f++; });
+    return c;
+  }
+  const shapeLabel = c => `${c.dc + c.dw}-${c.dm + c.m + c.om}-${c.f}${c.dm ? ` (${c.dm} DM)` : ''}${c.dw === 0 && c.dc >= 3 ? ' · 3 DC' : ''}`;
+  // The meta the user reports: 3+ central defenders, no full-backs, 2 forwards, 4+ in midfield.
+  const isMetaShape = c => c.dc >= 3 && c.dw === 0 && c.f >= 2 && c.dm + c.m + c.om >= 4;
   function matchSide(md, lineup, side) {
     const starters = Object.values(lineup || {}).filter(p => p && p.position && !String(p.position).toLowerCase().includes('sub'));
+    const shape = shapeOf(starters.map(p => p.position));
     const avg = k => starters.length ? starters.reduce((a, p) => a + (parseFloat(p[k]) || 0), 0) / starters.length : null;
     const pick = k => { const v = md[k]; const x = v && typeof v === 'object' ? v[side] : null; return x == null || x === '' ? null : Number(x); };
     const style = pick('attacking_style');
-    return { n: starters.length, rec: avg('rec'), rou: avg('routine'), ment: pick('mentality'), style: style === 0 ? 1 : style, focus: pick('focus_side') }; // style 0 = Balanced, as fetchNextMatchExpected treats it
+    return { n: starters.length, rec: avg('rec'), rou: avg('routine'), ment: pick('mentality'), style: style === 0 ? 1 : style, focus: pick('focus_side'), shape: shapeLabel(shape), meta: isMetaShape(shape) }; // style 0 = Balanced, as fetchNextMatchExpected treats it
   }
 
   let crawling = false;
@@ -3839,7 +3902,8 @@
     const played = [];
     Object.values(fx).forEach(mo => (mo && mo.matches || []).forEach(x => { if (x.result && /^\d+-\d+$/.test(x.result)) played.push(x); }));
     const bank = (getSlice('matchBank') || { data: {} }).data || {};
-    const todo = played.filter(x => !bank[x.id]).slice(0, maxNew);
+    // Entries crawled before shapes were recorded are read again (once).
+    const todo = played.filter(x => !bank[x.id] || (!bank[x.id].skip && bank[x.id].h && bank[x.id].h.shape == null)).slice(0, maxNew);
     let done = 0;
     for (const x of todo) {
       onProgress && onProgress(++done, todo.length);
@@ -3857,7 +3921,7 @@
     }
     Object.keys(bank).sort((p, q) => String(bank[q].d).localeCompare(String(bank[p].d))).slice(MATCH_BANK_CAP).forEach(id => delete bank[id]);
     setSlice('matchBank', bank);
-    return { added: todo.length, total: Object.keys(bank).length, remaining: played.filter(x => !bank[x.id]).length };
+    return { added: todo.length, total: Object.keys(bank).length, remaining: played.filter(x => !bank[x.id] || (!bank[x.id].skip && bank[x.id].h && bank[x.id].h.shape == null)).length };
   }
 
   // Daily, read-only, capped: the bank grows by itself whenever you play.
@@ -5414,6 +5478,7 @@
           ${settings.predictedGD != null ? `<div class="tma-row"><span>Expected (strength only, ${settings.weAreHome ? 'home' : 'away'})</span><span class="tma-goodval">${signed(settings.predictedGD)} goals · ${ev.context}</span></div>` : ''}
           ${ev.mentality ? `<div class="tma-mini" style="margin:6px 0 2px;">Mentality — sides in your situation (${ev.context}), goals vs expectation:</div>${effectRows(ev.mentality, MENTALITY)}` : ''}
           ${ev.style ? `<div class="tma-mini" style="margin:6px 0 2px;">Attacking style:</div>${effectRows(ev.style, ATT_STYLE)}` : ''}
+          ${best.shapeRows && best.shapeRows.length ? `<div class="tma-mini" style="margin:6px 0 2px;">Formations (all situations), goals vs expectation:</div>${best.shapeRows.slice(0, 6).map(x => `<div class="tma-row"><span>${esc(x.value)}${x.value === best.shape ? ' ✓' : ''}</span><span class="tma-mini">${x.mean >= 0 ? '+' : ''}${x.mean.toFixed(2)} ±${x.se.toFixed(2)} · n ${x.n}${x.n < LEARN_MIN_SAMPLES ? ' (too few)' : ''}</span></div>`).join('')}${(() => { const y = (best.metaRows || []).find(r => r.value === 'true'), n = (best.metaRows || []).find(r => r.value === 'false'); return y && n ? `<div class="tma-row"><span>3 DC + 2 FC meta vs the rest</span><span class="tma-mini">${(y.mean - n.mean) >= 0 ? '+' : ''}${(y.mean - n.mean).toFixed(2)} goals · ${y.n} v ${n.n} sides</span></div>` : ''; })()}` : (ev.ready ? '<div class="tma-mini" style="margin-top:6px;">Formation effects appear once matches are re-read with their shapes (Learn from more matches).</div>' : '')}
           <div class="tma-mini" style="margin-top:6px;">Other teams' matches only, and associations rather than experiments — a setting only overrides the heuristic when it clearly beats it.</div>`}
         ${graded.length ? `<div class="tma-mini" style="margin:8px 0 2px;">How our predictions did:</div>${graded.map(g => `<div class="tma-row"><span>${esc(g.d)} · ${esc(g.score)}</span><span class="tma-mini">predicted ${signed(g.gd)} · actual ${signed(g.actual)}</span></div>`).join('')}` : ''}
         <button class="tma-btn secondary" id="tma-learn">Learn from more matches</button>
@@ -5426,7 +5491,8 @@
       ${applyCardHtml(squad)}
       <div class="tma-card">
         <h4>Recommended Formation: ${best.formation} <span class="tma-badge">Avg R5 ${(best.totalRec / startingPlayers.length).toFixed(1)}</span></h4>
-        ${best.alternatives.length ? `<div class="tma-mini" style="margin-bottom:6px;">${best.alternatives.join(', ')} ${best.alternatives.length > 1 ? 'are' : 'is'} within 1% — for this squad the shape barely matters; who plays where does.</div>` : ''}
+        ${best.why ? `<div class="tma-mini" style="margin-bottom:6px;">Chosen ${esc(best.why)}.</div>` : ''}
+        ${best.alternatives.length ? `<div class="tma-mini" style="margin-bottom:6px;">${best.alternatives.join(', ')} ${best.alternatives.length > 1 ? 'are' : 'is'} within 1% on raw strength.</div>` : ''}
         <div class="tma-pitch">${pitchRowsHtml}</div>
       </div>
       <div class="tma-card">
@@ -5514,7 +5580,7 @@
     return `
       <div class="tma-card">
         <h4>Training progress <span class="tma-badge">${plans.length} players · both teams</span></h4>
-        <div class="tma-mini" style="margin-bottom:6px;">TI this week / 4-week average, skill points gained in ~4 weeks and since tracking began (weekly snapshots after Tuesday's training), R5 now → projected at ${PEAK_AGE} (last age before TM's decline, from your club's own training curve), and the custom plan (groups: str·wor·sta – mar·tac – cro·pac – pas·tec·set – hea·pos – fin·lon).</div>
+        <div class="tma-mini" style="margin-bottom:6px;">TI this week / 4-week average, skill points gained in ~4 weeks and since tracking began (weekly snapshots after Tuesday's training), R5 now → projected at ${projectionAge()} (your Max age on the Scouting tab — TM's decline starts at 28; from your club's own training curve), and the custom plan (groups: str·wor·sta – mar·tac – cro·pac – pas·tec·set – hea·pos – fin·lon).</div>
         ${(() => { const g = clubGrowth(); const parts = g.bands.map((b, i) => b.ti != null ? `${GROWTH_BANDS[i][0]}${GROWTH_BANDS[i][1] < 99 ? '–' + (GROWTH_BANDS[i][1] - 1) : '+'}: TI ${b.ti.toFixed(1)} (≈${(b.ti * TI_SKILL * SEASON_WEEKS).toFixed(0)} pts/season)` : null).filter(Boolean); return parts.length ? `<div class="tma-mini" style="margin-bottom:6px;">Your club's training by age — ${parts.join(' · ')}</div>` : ''; })()}
         ${rows.map(r => `<div class="tma-row"><span>${r.team === 'B' ? '<span class="tma-badge">res</span> ' : ''}${esc(r.name)} <span class="tma-mini">${r.age ? Math.floor(r.age) : '?'} · ${esc(String(r.slot).toUpperCase())}</span></span><span class="tma-mini" title="${esc(r.why)}">TI ${r.ti != null ? r.ti : '–'}${r.avg != null ? ' / ' + r.avg.toFixed(1) : ''} · ${r.g ? (r.g.gain >= 0 ? '+' : '') + r.g.gain + ' pts / ' + r.g.weeks + 'w' : 'tracking…'}${r.total && r.total.weeks > (r.g ? r.g.weeks : 0) ? ' (' + (r.total.gain >= 0 ? '+' : '') + r.total.gain + ' / ' + r.total.weeks + 'w)' : ''}${r.r5 != null ? ' · R5 ' + r.r5.toFixed(1) + (r.peak != null ? ' → ' + r.peak.toFixed(1) : '') : ''} · <b>${r.dots.join('-')}</b></span></div>`).join('')}
       </div>`;
@@ -5723,8 +5789,8 @@
     const endsIn = t => { const m = Math.round((t - now()) / 60e3); return m < 60 ? `in ${Math.max(0, m)}m` : m < 1440 ? `in ${Math.round(m / 60)}h` : `in ${Math.round(m / 1440)}d`; };
     const buyRow = r => `
       <div class="tma-buy">
-        <div class="tma-row"><span><a href="${playerLink(r)}" target="_blank" style="color:#79a8d6;text-decoration:none;font-weight:600;">${esc(r.name)} ↗</a>${r.steal ? ' <span class="tma-badge" title="Ends within the hour at a bid below his Sell-to-Agent price — you could sell him straight back to the agent for more">steal</span>' : ''}${natBadge(r)}</span><span class="tma-goodval" title="${r.slot ? 'What he adds to your XI now → in a year' : 'Projected R5 at ' + PEAK_AGE}">${r.slot ? '+' + r.gain.toFixed(1) + ' → +' + r.gainNext.toFixed(1) : 'R5 ' + r.r5.toFixed(1) + ' → ' + (r.peak != null ? r.peak.toFixed(1) : '?')}</span></div>
-        <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.routine != null ? ' · Rou ' + r.routine.toFixed(1) : ''}${r.ti != null ? ' · training TI ' + r.ti.toFixed(1) + '/wk' : ''}${r.pace ? ' · ~' + r.pace + ' skill pts next season' : ''}${r.peak != null ? ' · R5 at ' + PEAK_AGE + ' ≈ ' + r.peak.toFixed(1) : ''}</div>
+        <div class="tma-row"><span><a href="${playerLink(r)}" target="_blank" style="color:#79a8d6;text-decoration:none;font-weight:600;">${esc(r.name)} ↗</a>${r.steal ? ' <span class="tma-badge" title="Ends within the hour at a bid below his Sell-to-Agent price — you could sell him straight back to the agent for more">steal</span>' : ''}${natBadge(r)}</span><span class="tma-goodval" title="${r.slot ? 'What he adds to your XI now → in a year' : 'Projected R5 at ' + projectionAge()}">${r.slot ? '+' + r.gain.toFixed(1) + ' → +' + r.gainNext.toFixed(1) : 'R5 ' + r.r5.toFixed(1) + ' → ' + (r.peak != null ? r.peak.toFixed(1) : '?')}</span></div>
+        <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.routine != null ? ' · Rou ' + r.routine.toFixed(1) : ''}${r.ti != null ? ' · training TI ' + r.ti.toFixed(1) + '/wk' : ''}${r.pace ? ' · ~' + r.pace + ' skill pts next season' : ''}${r.peak != null ? ' · R5 at ' + projectionAge() + ' ≈ ' + r.peak.toFixed(1) : ''}</div>
         ${r.scout ? `<div class="tma-mini">🔍 Scouted${r.scout.potential != null ? ' · potential ' + r.scout.potential + '/20' : ''}${r.scout.dev ? ' · development ' + esc(r.scout.dev) : ''}${r.scout.peaks ? ' · peaks ' + ['phy', 'tac', 'tec'].map(k => (r.scout.peaks[k] || '?')).join('/') + ' (phy/tac/tec of 4)' : ''}</div>` : ''}
         <div class="tma-mini">${r.slot ? `Starts at <b>${esc(String(r.slot).toUpperCase())}</b>${r.replaces ? ' for ' + esc(r.replaces) : ''} · ` : ''}next bid ${fmtMoney(r.minBid)}${r.price > r.minBid ? ' · likely <b>' + fmtMoney(r.price) + '</b>' : ''}${r.fair ? ' · market rate ' + fmtMoney(Math.round(r.fair)) : ''}${r.ends ? ' · ends ' + endsIn(r.ends) : ''}${r.wage ? ' · wage ' + fmtMoney(r.wage) + '/wk' : ''}</div>
       </div>`;
@@ -5764,7 +5830,7 @@
       ${teamSection('First team', buys && buys.A, true, `R5 ≥ ${MIN_LINEUP_R5} (or under 24 and reaching it next season) <b>and</b> an upgrade to your best XI now and in a year (both sides projected). Best = biggest total gain; value = gain per million.`)}
       ${buys && buys.Y ? `
       <details class="tma-card"><summary style="cursor:pointer;"><h4 style="display:inline;">Youth prospects 🌱 <span class="tma-badge">${buys.Y.count}</span></h4></summary>
-        <div class="tma-mini" style="margin:4px 0;">Aged ≤ ${RESERVE_MAX_AGE}: they develop in the reserves. Listed only if projected to reach R5 ${buys.Y.bar.toFixed(1)} by ${PEAK_AGE} (your ${MIN_LINEUP_R5} floor, or your weakest starter if higher) — growth from his own training this season where his wage shows it, else your club's curve × his talent.</div>
+        <div class="tma-mini" style="margin:4px 0;">Aged ≤ ${RESERVE_MAX_AGE}: they develop in the reserves. Listed only if projected to reach R5 ${buys.Y.bar.toFixed(1)} by ${projectionAge()} (your ${MIN_LINEUP_R5} floor, or your weakest starter if higher) — growth from his own training this season where his wage shows it, else your club's curve × his talent.</div>
         ${bucket('Highest ceiling', buys.Y.best, true, 'No youth on the market is projected to reach that level within budget.')}
         ${bucket('Best value', buys.Y.value, false, 'None right now.')}
       </details>` : ''}
@@ -5772,10 +5838,10 @@
         const sl = (getSlice('sellList') || {}).data;
         if (!sl) return '';
         const line = r => `<div class="tma-buy"><div class="tma-row"><span><a href="${playerLink(r)}" target="_blank" style="color:#79a8d6;text-decoration:none;font-weight:600;">${esc(r.name)} ↗</a> <span class="tma-badge">${r.team === 'B' ? 'reserves' : 'first team'}</span></span><span>${r.sta ? fmtMoney(r.sta) : '—'}</span></div>
-          <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.peak != null ? ' → ' + r.peak.toFixed(1) + ' at ' + PEAK_AGE : ''}${r.wage ? ' · wage ' + fmtMoney(r.wage) + '/wk' : ''}</div>
+          <div class="tma-mini">${fmtAge(r.age)} · ${esc(r.fp || '?')} · R5 ${r.r5.toFixed(1)}${r.peak != null ? ' → ' + r.peak.toFixed(1) + ' at ' + projectionAge() : ''}${r.wage ? ' · wage ' + fmtMoney(r.wage) + '/wk' : ''}</div>
           <div class="tma-mini">${esc(r.why)}${r.staDrop > 0 ? ` · agent price falls ~${fmtMoney(Math.round(r.staDrop))} by next season` : ''}</div></div>`;
         return `<details class="tma-card"><summary style="cursor:pointer;"><h4 style="display:inline;">Sell recommendations <span class="tma-badge">${sl.sell.length}</span></h4></summary>
-          <div class="tma-mini" style="margin:4px 0;">Squad ${sl.size.A} + ${sl.size.B} reserves → ${sl.after.A} + ${sl.after.B} after these sales · about ${fmtMoney(sl.income)} from the agent · ${fmtMoney(sl.wages)}/wk in wages saved. Kept: your XI and bench, youths projected to reach R5 ${sl.bar.toFixed(1)} by ${PEAK_AGE}, and youths starting for the reserves; at least ${SELL_MIN_A} + ${SELL_MIN_B} players and ${SELL_MIN_GK} keepers per team stay (own heuristics). Price shown = Sell-to-Agent now — listing him can fetch more. Never sells for you.</div>
+          <div class="tma-mini" style="margin:4px 0;">Squad ${sl.size.A} + ${sl.size.B} reserves → ${sl.after.A} + ${sl.after.B} after these sales · about ${fmtMoney(sl.income)} from the agent · ${fmtMoney(sl.wages)}/wk in wages saved. Kept: your XI and bench, youths projected to reach R5 ${sl.bar.toFixed(1)} by ${projectionAge()}, and youths starting for the reserves; at least ${SELL_MIN_A} + ${SELL_MIN_B} players and ${SELL_MIN_GK} keepers per team stay (own heuristics). Price shown = Sell-to-Agent now — listing him can fetch more. Never sells for you.</div>
           ${sl.sell.map(line).join('') || '<div class="tma-mini">Nothing surplus right now.</div>'}
           ${sl.hold.length ? `<details class="tma-sub"><summary style="cursor:pointer;"><b>Surplus kept for numbers</b> <span class="tma-badge">${sl.hold.length}</span></summary>${sl.hold.map(line).join('')}</details>` : ''}
         </details>`;
@@ -5793,6 +5859,7 @@
       const fb = document.getElementById('tma-market-foreign'), ageEl = document.getElementById('tma-buy-maxage');
       ['senior', 'youth'].forEach(w => saveShortlistPrefs(w, { ...loadShortlistPrefs(w), includeForeign: !!(fb && fb.checked), ...(w === 'senior' && ageEl && ageEl.value ? { maxAge: Number(ageEl.value) } : {}) }));
       buildBuyLists();
+      try { buildSellList(); } catch (e) { console.warn('TM Advisor: sell list', e); }
       renderScouting();
     };
     ['tma-market-foreign', 'tma-buy-maxage'].forEach(id => { const el = document.getElementById(id); if (el) el.addEventListener('change', saveFilters); });
