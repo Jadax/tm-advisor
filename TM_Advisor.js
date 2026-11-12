@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.38.0
+// @version      3.39.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -3890,7 +3890,9 @@
       }
       if (steps.training && (force || state.trainingWeek !== week)) await step('training', 'Training', () => trainingStep(dry));
       if (steps.youth) await step('youth', 'Youth pull', () => handleYouthPull(dry));
-      if (steps.scouting && (force || state.scoutDay !== today)) await step('scouting', 'Scouting', () => scoutingStep(dry));
+      // A scout is away a few days per report: look for free ones every pass so he goes straight
+      // back out; the hire-list check stays daily.
+      if (steps.scouting) await step('scouting', 'Scouting', () => scoutingStep(dry, { hire: force || state.scoutDay !== today }));
       if (steps.facilities && (force || state.facilitiesWeek !== week)) await step('facilities', 'Facilities', () => applyFacilityUpgrade(dry));
       if (!dry) {
         const st = getSlice('autopilot').data;
@@ -4687,6 +4689,19 @@
   }
   // Rows of /scouts/ (yours) and /scouts/hire/ share the layout: name (+ "Wage: 76,868, Sign-on
   // fee: 6 Mil" on the hire list), then Sen Yth Phy Tac Tec Dev Psy. A blank cell reads as 0.
+  // A 20 shows as a gold star image and a 19 as a silver one, not as text (live 2026-11-12: a
+  // Yth 20 / Dev 20 scout read as 0 / 0). Read as "TM REC Studio" 1.4.1 extractSkill does.
+  function scoutCellValue(td) {
+    const img = td && td.querySelector('img');
+    if (img) {
+      const t = (img.getAttribute('alt') || img.getAttribute('title') || '').trim();
+      if (t === '19' || t === '20') return Number(t);
+      const src = (img.getAttribute('src') || '').toLowerCase();
+      if (src.includes('star_silver')) return 19;
+      if (src.includes('star')) return 20;
+    }
+    return Number((td && td.textContent || '').trim()) || 0;
+  }
   function parseScoutRows(doc) {
     const out = [];
     doc.querySelectorAll('tr').forEach(tr => {
@@ -4700,7 +4715,7 @@
         id: btn ? ((btn.getAttribute('href') || '').match(/,\s*(\d+)\s*\)/) || [])[1] : null,
         wage: wage ? Number(wage[1].replace(/,/g, '')) : 0,
         fee: fee ? Number(fee[1]) * (/mil/i.test(fee[2] || '') ? 1e6 : /k/i.test(fee[2] || '') ? 1e3 : 1) : 0 };
-      SCOUT_COLS.forEach((k, i) => { s[k] = Number(td[i + 1].textContent.trim()) || 0; });
+      SCOUT_COLS.forEach((k, i) => { s[k] = scoutCellValue(td[i + 1]); });
       out.push(s);
     });
     return out;
@@ -4760,18 +4775,24 @@
     }
     return lines;
   }
-  async function scoutingStep(dryRun) {
+  async function scoutingStep(dryRun, opts) {
     const mine = parseScoutRows(await fetchDoc('/scouts/'));
-    const lines = await hireMissingScouts(mine, dryRun);
+    const lines = opts && opts.hire === false ? [] : await hireMissingScouts(mine, dryRun);
     await loadTacticsPage();
     const squadA = tacticsPageSquad();
     const squadB = squadFromTacticsData(JSON.parse(await tmPost('/ajax/tactics_get.ajax.php', tmBase(1))));
     const info = await scoutInfo(squadA[0].id);
     const scouts = Object.values((info && info.scouts) || {});
     if (!scouts.length) return { ok: true, text: lines.join('; ') || 'no scouts hired' };
-    const roleOf = sc => { const row = mine.find(m => m.name === `${sc.name} ${sc.surname}`.trim()); return row ? scoutRole(row) : null; };
+    // players_get_info's scout objects carry the skills as numbers ("TM - Players Scout" reads
+    // them the same way) — the safest source; the /scouts/ table is the fallback.
+    const roleOf = sc => {
+      const n = k => Number(sc[k]) || 0;
+      if (sc.youths != null || sc.seniors != null) return scoutRole({ sen: n('seniors'), yth: n('youths'), phy: n('physical'), tac: n('tactical'), tec: n('technical'), dev: n('development'), psy: n('psychology') });
+      const row = mine.find(m => m.name === `${sc.name} ${sc.surname}`.trim()); return row ? scoutRole(row) : null;
+    };
     const free = scouts.filter(sc => !sc.away);
-    if (!free.length) return { ok: true, text: lines.concat(`all ${scouts.length} scout(s) out (${scouts.map(sc => sc.returns || 'away').join(', ')})`).join('; ') };
+    if (!free.length) return { ok: true, idle: !lines.length, text: lines.concat(`all ${scouts.length} scout(s) out (${scouts.map(sc => sc.returns || 'away').join(', ')})`).join('; ') };
     const summaries = (getSlice('scoutSummaries') || {}).data || {};
     const fresh = async p => {
       await sleep(120);
@@ -4804,7 +4825,7 @@
       lines.push(`sent ${sc.name} ${sc.surname}${role ? ` (${role})` : ''} to ${target.name}${target.target ? ' (transfer target)' : ''}`);
     }
     setSlice('scoutSummaries', summaries);
-    return { ok: true, text: lines.join('; ') };
+    return { ok: true, idle: !lines.some(l => /^(sent|would send|hired|would hire)/.test(l)), text: lines.join('; ') };
   }
 
   /* ============================================================
