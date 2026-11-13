@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.39.0
+// @version      3.40.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -4775,6 +4775,9 @@
     }
     return lines;
   }
+  // "TM Player Enhanced" treats `away` as truthy/falsy; a string "0" would read as away, so the
+  // usual false-y spellings count as free.
+  const scoutAway = sc => !(sc.away == null || sc.away === false || sc.away === 0 || sc.away === '0' || sc.away === '');
   async function scoutingStep(dryRun, opts) {
     const mine = parseScoutRows(await fetchDoc('/scouts/'));
     const lines = opts && opts.hire === false ? [] : await hireMissingScouts(mine, dryRun);
@@ -4788,10 +4791,15 @@
     // them the same way) — the safest source; the /scouts/ table is the fallback.
     const roleOf = sc => {
       const n = k => Number(sc[k]) || 0;
-      if (sc.youths != null || sc.seniors != null) return scoutRole({ sen: n('seniors'), yth: n('youths'), phy: n('physical'), tac: n('tactical'), tec: n('technical'), dev: n('development'), psy: n('psychology') });
+      if (sc.youths != null || sc.seniors != null) {
+        const r = scoutRole({ sen: n('seniors'), yth: n('youths'), phy: n('physical'), tac: n('tactical'), tec: n('technical'), dev: n('development'), psy: n('psychology') });
+        // No qualifying 20: he still works — on the age group his better skill judges (user:
+        // a Sen-17 / Phy-20 / Tac-20 scout is a senior scout, not idle and not on youths).
+        return r === 'youth' || r === 'senior' ? r : n('youths') > n('seniors') ? 'youth' : 'senior';
+      }
       const row = mine.find(m => m.name === `${sc.name} ${sc.surname}`.trim()); return row ? scoutRole(row) : null;
     };
-    const free = scouts.filter(sc => !sc.away);
+    const free = scouts.filter(sc => !scoutAway(sc));
     if (!free.length) return { ok: true, idle: !lines.length, text: lines.concat(`all ${scouts.length} scout(s) out (${scouts.map(sc => sc.returns || 'away').join(', ')})`).join('; ') };
     const summaries = (getSlice('scoutSummaries') || {}).data || {};
     const fresh = async p => {
@@ -4813,7 +4821,7 @@
     const taken = new Set();
     for (const sc of free) {
       const role = roleOf(sc);
-      const fits = p => role === 'senior' ? Number(p.age) >= 20 : role === 'youth' ? Number(p.age) < 20 : Number(p.age) <= RESERVE_MAX_AGE;
+      const fits = p => role === 'youth' ? Number(p.age) < 20 : Number(p.age) >= 20; // the guide: Yth judges ≤19, Sen 20+
       const pool = targets.filter(p => !taken.has(String(p.id)) && fits(p)).concat(all.filter(p => !taken.has(String(p.id)) && fits(p)));
       let target = null;
       for (const p of pool) { if (!(await fresh(p))) { target = p; break; } }
@@ -5413,7 +5421,7 @@
         ${toggle('tma-step-tactics', st.tactics, 'Opponent scan → XI, bench, captain &amp; set pieces, mentality/style/focus, conditional orders')}
         ${toggle('tma-step-training', st.training, 'Custom training — your role templates, tweaked per player toward his weakest key skills; balanced once fully developed')}
         ${toggle('tma-step-youth', st.youth, 'Youth pull — hire potential ≥17 where the position is needed, fire the rest (only when the report shows potential)')}
-        ${toggle('tma-step-scouting', st.scouting, 'Scouting — free scouts to your youths first; flags 20-rated scouts on the hire list')}
+        ${toggle('tma-step-scouting', st.scouting, 'Scouting — every free scout goes straight back out (checked every 10 min while TM is open): youth scouts on under-20s, senior scouts on 20+, transfer targets first; hires a missing youth / senior scout daily')}
         ${toggle('tma-step-facilities', st.facilities, 'Facility upgrades <b>(spends cash)</b> — training/youth first, else income that pays back within 26 weeks; one per run, never into the wage reserve')}
         <div class="tma-mini" style="margin:10px 0 2px;text-transform:uppercase;letter-spacing:.04em;">Automation</div>
         ${toggle('tma-ap-on', ap.enabled, 'Run by itself before each match (whenever you open a TM page) — once per match, never inside the tactics lock')}
@@ -5999,6 +6007,19 @@
     const p = location.pathname;
     return p.startsWith('/club/') || p.startsWith('/players') || p.startsWith('/youth-development');
   }
+  // Scouts on cooldown (user): independent of match prep and the autopilot's 20-minute gap —
+  // on load and every SCOUT_PULSE_MS while a TM page is open, any free scout is sent out.
+  // A shared timestamp keeps several open tabs from doubling up.
+  const SCOUT_PULSE_MS = 10 * 60e3;
+  async function scoutPulse() {
+    if (!window.SESSION || !SESSION.id || !copilotSteps().scouting || !autopilotPrefs().enabled) return;
+    const k = 'tmAdvisor_scoutPulse_' + clubId;
+    try { if (now() - (Number(localStorage.getItem(k)) || 0) < SCOUT_PULSE_MS - 30e3) return; localStorage.setItem(k, String(now())); } catch (e) {}
+    try {
+      const r = await scoutingStep(!!autopilotPrefs().dryRun, { hire: false });
+      if (r && !r.idle) autopilotLog('Scouts sent', r.ok, { lines: [r.text] });
+    } catch (e) { console.warn('TM Advisor: scout pulse', e); }
+  }
   function boot() {
     measureTmOffset(document); // #tm_clock was rendered moments ago
     injectStyle();
@@ -6009,6 +6030,7 @@
     if (window.top === window) {
       setTimeout(() => { runCopilot().catch(e => console.warn('TM Advisor: copilot', e)); }, 4000);
       setTimeout(() => { backgroundCrawl(); }, 15000); // after the autopilot, never competing with it
+      setTimeout(() => { scoutPulse(); setInterval(scoutPulse, SCOUT_PULSE_MS); }, 25000);
     }
   }
 
