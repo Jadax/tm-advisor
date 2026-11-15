@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.40.0
+// @version      3.41.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -61,6 +61,8 @@
  *   SECTION 5N RESERVE TEAM          (demote ≤21 non-squad youths, promote, reserve XI)
  *   SECTION 5O YOUTH PULLS           (hire ≥17 potential where needed; acts only on real potential)
  *   SECTION 5P SCOUTING              (keeps 1 youth + 1 senior 20-rated scout; sends free scouts)
+ *   SECTION 5Q SELF-CHECK            (version vs GitHub, data freshness, parser sanity,
+ *                                       pre-save tactic guard, own-results ledger)
  *   SECTION 6  STADIUM ENGINE        (upgrade ROI ranking)
  *   SECTION 7  UI                    (styles, panel; ONE context-relevant
  *                                       tab per page)
@@ -3614,7 +3616,28 @@
       EVENT_ID: String(o.eventId), EVENT_PAR: String(o.eventPar), COND_ID: String(o.condId), COND_PAR: String(o.condPar),
       ORDER_ID: String(o.orderId), ORDER_PAR1: String(o.par1), ORDER_PAR2: String(o.par2 != null ? o.par2 : 0), ORDER_PAR3: o.par3 != null ? String(o.par3) : null,
     }));
-    return { onField, mentality: String(plan.settings.mentality), style: String(plan.settings.style), focus: String(plan.settings.focus), orders };
+    const placed = plan.best.lineup.map(l => l.player).concat(plan.bench.named.map(b => b.player)).filter(Boolean);
+    return { onField, mentality: String(plan.settings.mentality), style: String(plan.settings.style), focus: String(plan.settings.focus), orders, foreign: placed.filter(isForeign).length };
+  }
+  // Structural check before anything is posted (user: no mistakes reach the game). An empty
+  // slot can forfeit; a role or sub order naming someone outside the sheet is dropped by TM
+  // silently. Undo restores what was saved before, as it was (`restore`).
+  function tacticProblems(state) {
+    if (state.restore) return [];
+    const f = state.onField || {}, out = [];
+    const starters = Object.keys(SLOT_NUM).map(k => f[k]).filter(v => v && v !== '0');
+    const subs = ['sub1', 'sub2', 'sub3', 'sub4', 'sub5'].map(k => f[k]).filter(v => v && v !== '0');
+    if (starters.length !== 11) out.push(`${starters.length} starters, not 11`);
+    if (!f.gk || f.gk === '0') out.push('no goalkeeper');
+    const ids = starters.concat(subs);
+    if (new Set(ids).size !== ids.length) out.push('a player is placed twice');
+    ['captain', 'corner', 'penalty', 'freekick'].forEach(r => { if (f[r] && f[r] !== '0' && !starters.includes(f[r])) out.push(`${r} is not in the XI`); });
+    if (!MENTALITY[Number(state.mentality)]) out.push(`mentality ${state.mentality}?`);
+    if (!ATT_STYLE[Number(state.style)]) out.push(`attacking style ${state.style}?`);
+    if (!FOCUS_SIDE[Number(state.focus)]) out.push(`focus ${state.focus}?`);
+    (state.orders || []).forEach(o => { if (String(o.ORDER_ID) === String(CO_ORDER.SUB) && (!ids.includes(String(o.ORDER_PAR1)) || !ids.includes(String(o.ORDER_PAR2)))) out.push('a sub order names a player outside XI + bench'); });
+    if (state.foreign != null && state.foreign > MAX_FOREIGN) out.push(`${state.foreign} foreigners (max ${MAX_FOREIGN})`);
+    return out;
   }
 
   const tmPost = (url, data) => new Promise((resolve, reject) =>
@@ -3645,6 +3668,8 @@
   }
 
   async function writeTactic(state, current, res) {
+    const problems = tacticProblems(state);
+    if (problems.length) throw new Error('refused to save — ' + problems.join('; '));
     const placed = new Set(POSITION_KEYS.map(k => state.onField[k]).filter(v => v !== '0'));
     const moves = {};
     POSITION_KEYS.forEach(k => { if (state.onField[k] !== '0') moves[state.onField[k]] = k; });
@@ -3903,6 +3928,7 @@
           facilitiesWeek: done.facilities ? week : st.facilitiesWeek });
       }
       if (!lines.length) return null; // nothing was due this pass
+      try { healthChecks().filter(x => x.lvl === 'bad').forEach(x => { lines.push('✖ Self-check: ' + x.text); allOk = false; }); } catch (e) {}
       return autopilotLog(`${dry ? 'Dry run' : force ? 'Prepared' : 'Autopilot'}${vs ? ' v ' + vs : ''}`, allOk, { matchId, lines });
     } catch (e) {
       return autopilotLog('Copilot failed: ' + e.message, false, { lines });
@@ -4787,6 +4813,7 @@
     const info = await scoutInfo(squadA[0].id);
     const scouts = Object.values((info && info.scouts) || {});
     if (!scouts.length) return { ok: true, text: lines.join('; ') || 'no scouts hired' };
+    setSlice('scoutStaff', scouts.map(sc => ({ name: `${sc.name} ${sc.surname}`.trim(), sen: Number(sc.seniors) || 0, yth: Number(sc.youths) || 0, away: scoutAway(sc) })));
     // players_get_info's scout objects carry the skills as numbers ("TM - Players Scout" reads
     // them the same way) — the safest source; the /scouts/ table is the fallback.
     const roleOf = sc => {
@@ -4834,6 +4861,133 @@
     }
     setSlice('scoutSummaries', summaries);
     return { ok: true, idle: !lines.some(l => /^(sent|would send|hired|would hire)/.test(l)), text: lines.join('; ') };
+  }
+
+  /* ============================================================
+   *  SECTION 5Q — SELF-CHECK
+   *  ------------------------------------------------------------
+   *  Each mistake seen so far became a check: an old installed copy saved a
+   *  4-4-2 (version vs GitHub), empty caches gave empty buy lists (freshness),
+   *  scout 20s read as 0 and position codes read as display (parser sanity),
+   *  idle scouts (pulse outcome), and nothing graded our own setup (ledger).
+   * ============================================================ */
+
+  // Keep equal to @version — the self-check flags a mismatch with Tampermonkey's own copy.
+  const BUILD_VERSION = '3.41.0';
+  const installedVersion = () => { try { return (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || BUILD_VERSION; } catch (e) { return BUILD_VERSION; } };
+  const cmpVersion = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
+  const VERSION_URL = 'https://raw.githubusercontent.com/Jadax/tm-advisor/main/TM_Advisor.js';
+  async function checkLatestVersion(force) {
+    const prev = getSlice('latestVersion') || {};
+    if (!force && prev.t && now() - prev.t < 20 * 3600e3) return prev.data;
+    try {
+      const txt = await fetch(VERSION_URL, { cache: 'no-store' }).then(r => r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status)));
+      const v = (txt.match(/@version\s+(\d+\.\d+\.\d+)/) || [])[1];
+      if (v) { setSlice('latestVersion', v); return v; }
+    } catch (e) { console.warn('TM Advisor: version check', e); }
+    return prev.data || null;
+  }
+
+  // Our own league results by the setup we played: goals vs what the strength model expected
+  // (as the other tables), plus points. Our squad is the same in every row, so a gap BETWEEN
+  // our own setups is a fairer read than any one setup's raw mean.
+  function ownLedger(model) {
+    model = model || fitResultModel();
+    if (!model.ready) return null;
+    const own = model.samples.filter(x => x.team === clubId);
+    if (!own.length) return null;
+    const pts = gd => gd > 0 ? 3 : gd === 0 ? 1 : 0;
+    const stat = list => {
+      const r = list.map(x => x.res), n = r.length, mean = r.reduce((a, b) => a + b, 0) / n;
+      const sd = Math.sqrt(r.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, n - 1));
+      return { n, mean, se: sd / Math.sqrt(n), ppg: list.reduce((a, x) => a + pts(Math.round(x.exp + x.res)), 0) / n };
+    };
+    const groups = {};
+    own.forEach(x => {
+      const key = `${x.s.shape || '?'} · ${MENTALITY[Number(x.s.ment)] || '?'} / ${ATT_STYLE[Number(x.s.style)] || '?'}`;
+      (groups[key] = groups[key] || []).push(x);
+    });
+    const rows = Object.entries(groups).map(([key, list]) => ({ key, ...stat(list) })).sort((a, b) => b.n - a.n || b.mean - a.mean);
+    return { all: stat(own), rows };
+  }
+
+  // The model vs "always a draw" on our graded predictions: is it telling us anything?
+  function predictionCalibration() {
+    const g = gradedPredictions();
+    if (g.length < 6) return { n: g.length };
+    const err = g.map(x => x.actual - x.gd);
+    return { n: g.length,
+      bias: err.reduce((a, b) => a + b, 0) / g.length,
+      mae: err.reduce((a, b) => a + Math.abs(b), 0) / g.length,
+      naive: g.reduce((a, x) => a + Math.abs(x.actual), 0) / g.length,
+      sign: g.filter(x => Math.sign(x.actual) === Math.sign(Math.round(x.gd))).length / g.length };
+  }
+
+  // Every check: {lvl: 'bad'|'warn'|'ok', text}. Sync, from the cache — cheap enough per render.
+  const DAY_MS = 864e5;
+  function healthChecks() {
+    const out = [], add = (lvl, text) => out.push({ lvl, text });
+    const sliceAge = k => { const x = getSlice(k); return x && x.t ? now() - x.t : Infinity; };
+    if (!window.SESSION || !SESSION.id) add('bad', 'Not signed in to TrophyManager — nothing can run.');
+    // 1. Version
+    const inst = installedVersion(), latest = (getSlice('latestVersion') || {}).data;
+    if (inst !== BUILD_VERSION) add('warn', `Tampermonkey reports v${inst} but the code says v${BUILD_VERSION} — reinstall from GitHub.`);
+    if (latest && cmpVersion(latest, inst) > 0) add('bad', `Running v${inst}; GitHub has v${latest}. Tampermonkey → Utilities → "Check for userscript updates" (an old copy once saved a 4-4-2).`);
+    else if (latest) add('ok', `v${inst} — up to date.`);
+    // 2. Copilot
+    const ap = autopilotPrefs(), log = (getSlice('autopilotLog') || {}).data || [];
+    if (!ap.enabled) add('warn', 'Autopilot is off — nothing runs by itself.');
+    else if (ap.dryRun) add('warn', 'Autopilot is in dry run — it plans but saves nothing.');
+    const lastRun = log.find(e => !/^Scouts sent/.test(e.msg));
+    if (lastRun && !lastRun.ok) add('warn', `Last copilot run had problems (${ago(lastRun.t)}): ${(lastRun.lines || []).filter(l => /^[⚠✖]/.test(l)).join(' ') || lastRun.msg}`);
+    const nmi = nextMatchInfo();
+    if (nmi && nmi.kickoff && !nmi.applied) {
+      const toLock = nmi.lockAt - now();
+      if (toLock < 0 && now() < nmi.kickoff) add('bad', "The next match locked without the engine's tactic.");
+      else if (toLock > 0 && toLock < DAY_MS) add('warn', `Tactic not set for the next match yet — it locks in ${Math.max(1, Math.round(toLock / 36e5))}h. Open any TM page (or ⚡ Prepare match).`);
+    }
+    // 3. Data freshness: the XI, buy and sell lists are only as good as these
+    [['players', 'Your squad (/players/)', 7], ['ownSquads', 'Both squads with skills (market scan)', 7], ['home', 'Fixtures (/home/)', 2]].forEach(([k, label, days]) => {
+      const a = sliceAge(k);
+      if (a === Infinity) add('warn', `${label}: never read in this browser.`);
+      else if (a > days * DAY_MS) add('warn', `${label}: ${Math.floor(a / DAY_MS)} days old.`);
+    });
+    // 4. Learning
+    const bank = Object.values((getSlice('matchBank') || {}).data || {}).filter(m => !m.skip);
+    const top = bank.filter(m => m.lg === '1.1').length, shaped = bank.filter(m => m.h && m.h.shapeV === SHAPE_V).length;
+    if (bank.length < LEARN_MIN_MATCHES) add('warn', `Learning: ${bank.length} matches in the bank — the model needs ${LEARN_MIN_MATCHES}.`);
+    else add('ok', `Learning: ${bank.length} matches (${top} top division), last crawl ${ago((getSlice('matchBankCrawl') || {}).t)}.`);
+    if (bank.length && shaped / bank.length < 0.9) add('warn', `Learning: ${shaped} of ${bank.length} matches carry current formation labels — older ones are re-read over the next crawls.`);
+    if (bank.length >= LEARN_MIN_MATCHES && top < 2 * LEARN_MIN_MATCHES) add('warn', `Learning: ${top} top-division matches — settings are judged on your own division until ${2 * LEARN_MIN_MATCHES}.`);
+    if (bank.length && sliceAge('matchBankCrawl') > 3 * DAY_MS) add('warn', 'Learning: no new results read for 3+ days.');
+    const cal = predictionCalibration();
+    if (cal.n >= 6 && cal.mae > cal.naive) add('warn', `Predictions missed by ${cal.mae.toFixed(1)} goals on average — worse than guessing a draw (${cal.naive.toFixed(1)}) over ${cal.n} matches.`);
+    // 5. Our own setups
+    const led = bank.length >= LEARN_MIN_MATCHES ? ownLedger() : null;
+    const weak = led && led.rows.find(r => r.n >= 6 && r.mean + 1.5 * r.se < 0);
+    if (weak) add('warn', `Our ${weak.key} has run ${weak.mean.toFixed(2)} ±${weak.se.toFixed(2)} goals below the ratings over ${weak.n} matches.`);
+    // 6. Parser sanity (past bugs: star 20s read as 0, position codes read as display)
+    const staff = (getSlice('scoutStaff') || {}).data, pulse = getSlice('scoutPulse');
+    const staffBroken = staff && staff.length && staff.every(x => !x.sen && !x.yth);
+    if (staffBroken) add('bad', 'Scout skills all read as 0 — the scout parser is broken.');
+    if (pulse && pulse.data && !pulse.data.ok) add('warn', `Scout check failed ${ago(pulse.t)}: ${pulse.data.text}`);
+    else if (staff && staff.length && !staffBroken) add('ok', `Scouts: ${staff.map(x => `${x.name} ${x.away ? 'out' : 'free'}`).join(', ')} (checked ${ago((pulse || getSlice('scoutStaff')).t)}).`);
+    const players = (getSlice('players') || {}).data || [];
+    const codeFp = players.filter(x => /^[a-z]{1,3}(,[a-z]{1,3})*$/.test(String(x.fp || ''))).length;
+    if (codeFp) add('bad', `${codeFp} player(s) carry position codes ("dc,dmc") instead of display positions — their R5 would skip TM's position penalty.`);
+    const noR5 = players.filter(x => { const r = ensureR5({ ...x }); return r == null || isNaN(r); }).length;
+    if (players.length && noR5 > players.length / 4) add('warn', `${noR5} of ${players.length} squad players have no R5 — skills or SI missing from the capture.`);
+    return out;
+  }
+
+  const HEALTH_ORDER = { bad: 0, warn: 1, ok: 2 };
+  function healthCardHtml() {
+    const h = healthChecks().sort((a, b) => HEALTH_ORDER[a.lvl] - HEALTH_ORDER[b.lvl]);
+    const bad = h.filter(x => x.lvl === 'bad').length, warn = h.filter(x => x.lvl === 'warn').length;
+    const col = { bad: '#e05555', warn: 'var(--tma-amber)', ok: 'var(--tma-lime)' }, ico = { bad: '✖', warn: '⚠', ok: '✔' };
+    return `<div class="tma-card"><h4>Self-check <span class="tma-badge">${bad ? bad + ' problem' + (bad > 1 ? 's' : '') : warn ? warn + ' warning' + (warn > 1 ? 's' : '') : 'all good'}</span></h4>
+      ${h.map(x => `<div class="tma-mini" style="padding:2px 0;"><span style="color:${col[x.lvl]};font-weight:700;">${ico[x.lvl]}</span> ${esc(x.text)}</div>`).join('')}
+    </div>`;
   }
 
   /* ============================================================
@@ -5397,6 +5551,7 @@
         ${rows}
         <div class="tma-progress" id="tma-progress"></div>
       </div>
+      ${healthCardHtml()}
       ${lastResultHtml}
       <div class="tma-card">
         <h4>Next Match</h4>
@@ -5578,6 +5733,12 @@
           ${ev.style ? `<div class="tma-mini" style="margin:6px 0 2px;">Attacking style:</div>${effectRows(ev.style, ATT_STYLE)}` : ''}
           ${best.shapeRows && best.shapeRows.length ? `<div class="tma-mini" style="margin:6px 0 2px;">Formations (all situations), goals vs expectation:</div>${best.shapeRows.slice(0, 6).map(x => `<div class="tma-row"><span>${esc(x.value)}${x.value === best.shape ? ' ✓' : ''}</span><span class="tma-mini">${x.mean >= 0 ? '+' : ''}${x.mean.toFixed(2)} ±${x.se.toFixed(2)} · n ${x.n}${x.n < LEARN_MIN_SAMPLES ? ' (too few)' : ''}</span></div>`).join('')}${(() => { const y = (best.metaRows || []).find(r => r.value === 'true'), n = (best.metaRows || []).find(r => r.value === 'false'); return y && n ? `<div class="tma-row"><span>3 DC + 2 FC meta vs the rest</span><span class="tma-mini">${(y.mean - n.mean) >= 0 ? '+' : ''}${(y.mean - n.mean).toFixed(2)} goals · ${y.n} v ${n.n} sides</span></div>` : ''; })()}` : (ev.ready ? '<div class="tma-mini" style="margin-top:6px;">Formation effects appear once matches are re-read with their shapes (Learn from more matches).</div>' : '')}
           <div class="tma-mini" style="margin-top:6px;">Other teams' matches only, and associations rather than experiments — a setting only overrides the heuristic when it clearly beats it.</div>`}
+        ${(() => {
+          const led = ev.ready ? ownLedger() : null;
+          if (!led) return '';
+          return `<div class="tma-mini" style="margin:8px 0 2px;">Our own league matches by setup — goals vs our ratings, points per game:</div>${led.rows.slice(0, 6).map(r => `<div class="tma-row"><span>${esc(r.key)}</span><span class="tma-mini">${r.mean >= 0 ? '+' : ''}${r.mean.toFixed(2)}${r.n > 1 ? ' ±' + r.se.toFixed(2) : ''} · ${r.ppg.toFixed(2)} pts · n ${r.n}</span></div>`).join('')}<div class="tma-row"><span><b>All</b></span><span class="tma-mini">${led.all.mean >= 0 ? '+' : ''}${led.all.mean.toFixed(2)} · ${led.all.ppg.toFixed(2)} pts · n ${led.all.n}</span></div>`;
+        })()}
+        ${(() => { const c = predictionCalibration(); return c.n >= 6 ? `<div class="tma-mini" style="margin-top:4px;">Prediction check (${c.n} matches): average miss ${c.mae.toFixed(1)} goals vs ${c.naive.toFixed(1)} for "always a draw"; winner right ${Math.round(c.sign * 100)}%; bias ${c.bias >= 0 ? '+' : ''}${c.bias.toFixed(2)}.</div>` : ''; })()}
         ${graded.length ? `<div class="tma-mini" style="margin:8px 0 2px;">How our predictions did:</div>${graded.map(g => `<div class="tma-row"><span>${esc(g.d)} · ${esc(g.score)}</span><span class="tma-mini">predicted ${signed(g.gd)} · actual ${signed(g.actual)}</span></div>`).join('')}` : ''}
         <button class="tma-btn secondary" id="tma-learn">Learn from more matches</button>
         <div class="tma-progress" id="tma-learn-status"></div>
@@ -5745,7 +5906,7 @@
     }));
     bindBtn('tma-undo', run('Undoing', () => {
       const b = getSlice('tacticsBackup').data;
-      return saveTacticAndVerify({ ...b, orders: b.orders.map(o => Object.fromEntries(ORDER_FIELDS.map(f => [f, o[f]]))) }, 'Undo', false);
+      return saveTacticAndVerify({ ...b, restore: true, orders: b.orders.map(o => Object.fromEntries(ORDER_FIELDS.map(f => [f, o[f]]))) }, 'Undo', false);
     }));
   }
 
@@ -6017,8 +6178,9 @@
     try { if (now() - (Number(localStorage.getItem(k)) || 0) < SCOUT_PULSE_MS - 30e3) return; localStorage.setItem(k, String(now())); } catch (e) {}
     try {
       const r = await scoutingStep(!!autopilotPrefs().dryRun, { hire: false });
+      setSlice('scoutPulse', { ok: !!r.ok, text: r.text });
       if (r && !r.idle) autopilotLog('Scouts sent', r.ok, { lines: [r.text] });
-    } catch (e) { console.warn('TM Advisor: scout pulse', e); }
+    } catch (e) { console.warn('TM Advisor: scout pulse', e); setSlice('scoutPulse', { ok: false, text: e.message }); }
   }
   function boot() {
     measureTmOffset(document); // #tm_clock was rendered moments ago
@@ -6031,6 +6193,7 @@
       setTimeout(() => { runCopilot().catch(e => console.warn('TM Advisor: copilot', e)); }, 4000);
       setTimeout(() => { backgroundCrawl(); }, 15000); // after the autopilot, never competing with it
       setTimeout(() => { scoutPulse(); setInterval(scoutPulse, SCOUT_PULSE_MS); }, 25000);
+      setTimeout(() => { checkLatestVersion(); }, 8000);
     }
   }
 

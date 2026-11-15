@@ -42,6 +42,17 @@ One **⚡ Prepare match** button — at the top of the panel on every page, the 
 
 **Autopilot is on by default** (switch it off on the Dashboard): whenever a TM page is open in your browser it prepares both teams for every fixture, runs training once per training week, handles each weekly youth report, scouts daily — never inside a match's tactics lock. It can only run while TM is open in a browser with the script installed, so open TM at least once before each match locks. A dry run shows exactly what it would change.
 
+**Self-check** (top of the Dashboard, and in every copilot log entry when something is wrong). The checks:
+- the installed version against GitHub, checked daily. An old copy once saved a 4-4-2.
+- whether the next match's tactic is set before the lock.
+- how old the squad, fixture and market data are.
+- the learning bank: its size, top-division coverage and formation labels.
+- whether the predictions beat "always a draw".
+- whether your own setup is running clearly below your ratings.
+- parser sanity: scout skills read as 0, position codes, missing R5.
+
+Before anything is saved, the tactic is checked too. It must have 11 starters and a keeper, nobody placed twice, roles taken by starters, valid settings, sub orders naming squad-sheet players, and at most 5 foreigners. A plan that fails is refused and logged, never posted.
+
 No slot is ever left empty (an empty slot can forfeit a match): if a position has no natural player, the best available player with the smallest out-of-position penalty takes it — even an outfielder in goal as a last resort. Conditional orders are timed to the matchup: as the underdog the team holds a lead early and chases late, as the favourite it chases early and protects late.
 
 ### 🧠 Tactics Engine
@@ -200,6 +211,7 @@ No skills are invented. No ratings are guessed. Everything comes from what the g
 - **Everything stays in your browser.** All data is stored in `localStorage` — nothing is sent anywhere except trophymanager.com itself.
 - **It does fetch TM pages in the background** — your next fixture, the opponent's squad and recent matches, your division's match reports (daily, capped), and transfer-list searches when you press Market Scan. Requests are sequential with short pauses, never in bursts.
 - **It only changes your club when you ask it to:** Apply / Undo on the Tactics page, Prepare match, or autopilot — and only the steps you've switched on. It never bids, buys or sells players.
+- **One request outside TM:** once a day it reads this script's version number from GitHub (raw.githubusercontent.com) to warn you if your installed copy is out of date. Nothing is sent.
 - **No tracking, no analytics, no cookies.**
 
 ---
