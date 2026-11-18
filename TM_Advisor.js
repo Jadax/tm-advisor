@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.41.0
+// @version      3.41.1
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -3000,11 +3000,20 @@
     const sl = getSlice('players');
     if (!sl || !sl.data || !sl.data.length) return null;
     const squad = firstTeamOnly(sl.data).map(p => ({ ...p }));
-    return { squad, base: bestFormation(squad) };
+    return fieldedContext(squad);
+  }
+  // The XI the engine actually fields (chooseFormation — the meta by default), not the
+  // strongest raw shape: buys, sells and promotions were judged against a 1-FC shape while
+  // the 3-1-4-2 played two, so the weaker FC never showed up as a starter to replace.
+  function fieldedContext(squad, formation, boost) {
+    squad.forEach(ensureR5);
+    const key = formation || chooseFormation(squad, boost).formation;
+    return { squad, formation: key, base: pickBestXI(squad, key, boost) };
   }
   function xiImpact(candidate, ctx) {
     const c = { ...candidate, id: 'cand-' + candidate.id };
-    const withHim = bestFormation(ctx.squad.concat([c]));
+    ensureR5(c);
+    const withHim = ctx.formation ? pickBestXI(ctx.squad.concat([c]), ctx.formation) : bestFormation(ctx.squad.concat([c]));
     const spot = withHim.lineup.find(l => l.player === c);
     if (!spot) return { gain: 0, slot: null, replaces: null };
     const ids = new Set(withHim.lineup.filter(l => l.player).map(l => String(l.player.id)));
@@ -3274,7 +3283,8 @@
   function teamContext(squad) {
     if (!squad || squad.length < 11) return null;
     const now0 = squad.map(p => ({ ...p })), next = squad.map(p => projectPlayer({ ...p }, PROJECT_YEARS));
-    return { now: { squad: now0, base: bestFormation(now0) }, next: { squad: next, base: bestFormation(next) } };
+    const now1 = fieldedContext(now0);
+    return { now: now1, next: fieldedContext(next, now1.formation) };
   }
   function solve3(A, y) { // Gaussian elimination for the 3x3 normal equations
     const M = A.map((r, i) => [...r, y[i]]);
@@ -3310,7 +3320,7 @@
     if (!ctx) return null;
     const base = ctx.now.base, starters = new Set(base.lineup.filter(l => l.player).map(l => String(l.player.id)));
     const bench = new Set(pickBench(A.filter(p => !starters.has(String(p.id)))).named.filter(b => b.player).map(b => String(b.player.id)));
-    const bXi = B.length >= 11 ? new Set(bestFormation(B.map(p => ({ ...p })), p => (Number(p.age) || 99) < RESERVE_MAX_AGE + 1 ? RESERVE_YOUTH_BOOST : 1).lineup.filter(l => l.player).map(l => String(l.player.id))) : new Set();
+    const bXi = B.length >= 11 ? new Set(fieldedContext(B.map(p => ({ ...p })), null, p => (Number(p.age) || 99) < RESERVE_MAX_AGE + 1 ? RESERVE_YOUTH_BOOST : 1).base.lineup.filter(l => l.player).map(l => String(l.player.id))) : new Set();
     const bar = Math.max(MIN_LINEUP_R5, Math.min(...base.lineup.filter(l => l.player).map(l => l.effectiveR5)));
     const rows = A.map(p => ({ p, team: 'A' })).concat(B.map(p => ({ p, team: 'B' }))).map(({ p, team }) => {
       const id = String(p.id), age = Number(p.age) || 0, isGK = bucketFor(p.fp) === 'GK';
@@ -3320,7 +3330,7 @@
       const ti = recentTi(p);
       let keep = null;
       if (team === 'A' && starters.has(id)) {
-        const without = bestFormation(A.filter(x => String(x.id) !== id).map(x => ({ ...x })));
+        const without = pickBestXI(ctx.now.squad.filter(x => String(x.id) !== id), ctx.now.formation);
         const loss = base.totalRec - without.totalRec;
         if (loss >= SENIOR_CRITERIA.minXiGain) keep = `starts (${loss.toFixed(1)} R5 points lost without him)`;
       }
@@ -3399,7 +3409,7 @@
         const pk = peakProjection(l.player);
         return { slot: l.slot, id: l.player.id, name: l.player.name, r5: Number(l.effectiveR5.toFixed(1)), peak: pk, below: l.effectiveR5 < MIN_LINEUP_R5, best: top, value: val && (!top || val.id !== top.id) ? val : null };
       });
-      return { best, value, bySlot, upgrades: rows.length, belowFloor: bySlot.filter(x => x.below).length, foreignXi: ctx.now.base.lineup.filter(l => isForeign(l.player)).length };
+      return { formation: ctx.now.formation, best, value, bySlot, upgrades: rows.length, belowFloor: bySlot.filter(x => x.below).length, foreignXi: ctx.now.base.lineup.filter(l => isForeign(l.player)).length };
     };
     // What the market charges for a given R5 and age (heuristic): least squares of ln(price) on
     // R5 and age over every listing in budget. A buy priced well above that is overpriced for
@@ -4503,7 +4513,7 @@
     const planA = buildMatchPlan(squadA, sl('opponent'), sl('opponentScouting'), sl('opponentExpected'), { restBanRisk: restBanRisk() });
     const keep = new Set(planA.best.lineup.filter(l => l.player).map(l => String(l.player.id)).concat(planA.bench.named.filter(b => b.player).map(b => String(b.player.id))));
     const down = squadA.filter(p => (Number(p.age) || 99) < RESERVE_MAX_AGE + 1 && !keep.has(String(p.id)));
-    const ctx = { squad: squadA.map(p => ({ ...p })), base: bestFormation(squadA.map(p => ({ ...p }))) };
+    const ctx = fieldedContext(squadA.map(p => ({ ...p })));
     const up = squadB.filter(p => (Number(p.age) || 99) < RESERVE_MAX_AGE + 1 && xiImpact(p, ctx).gain >= SENIOR_CRITERIA.minXiGain);
     // XI + 5 subs = 16: below that the first team can't name a full bench, so the best fit B
     // players (any age) go up, by how much they'd add to the XI.
@@ -4873,7 +4883,7 @@
    * ============================================================ */
 
   // Keep equal to @version — the self-check flags a mismatch with Tampermonkey's own copy.
-  const BUILD_VERSION = '3.41.0';
+  const BUILD_VERSION = '3.41.1';
   const installedVersion = () => { try { return (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || BUILD_VERSION; } catch (e) { return BUILD_VERSION; } };
   const cmpVersion = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
   const VERSION_URL = 'https://raw.githubusercontent.com/Jadax/tm-advisor/main/TM_Advisor.js';
@@ -6059,7 +6069,7 @@
       </details>`;
     const pick = e => e ? `<a href="${playerLink(e)}" target="_blank" style="color:#79a8d6;text-decoration:none;font-weight:600;">${esc(e.name)}</a> <span class="tma-goodval">+${e.gain.toFixed(1)}</span><div class="tma-mini">${Math.floor(e.age)}y · R5 ${e.r5.toFixed(1)} · ${fmtMoney(e.price)}</div>` : '<span class="tma-mini">—</span>';
     const slotMap = t => t && t.bySlot && t.bySlot.length ? `
-      <details class="tma-sub" open><summary style="cursor:pointer;"><b>By position</b> <span class="tma-mini">weakest starter first</span></summary>
+      <details class="tma-sub" open><summary style="cursor:pointer;"><b>By position</b> <span class="tma-mini">weakest starter first${t && t.formation ? ' · in the ' + esc(t.formation) + ' the engine fields' : ''}</span></summary>
         <table class="tma-pos"><tr><th>Pos</th><th>Starter</th><th>Best</th><th>Value</th></tr>
         ${t.bySlot.map(x => `<tr><td><b>${esc(x.slot.toUpperCase())}</b></td><td>${esc(x.name)}<div class="tma-mini" style="${x.below ? 'color:var(--tma-amber);font-weight:700;' : ''}">${x.r5.toFixed(1)}${x.peak != null ? ' → ' + x.peak.toFixed(1) : ''}${x.below ? ' ⚠' : ''}</div></td><td>${pick(x.best)}</td><td>${pick(x.value)}</td></tr>`).join('')}
         </table>
@@ -6136,8 +6146,8 @@
     bind('tma-market-scan', runScan);
     // Opening the Scouting tab with a stale (or no) scan starts one: the lists are the point.
     if (!marketAutoScanned && window.SESSION && SESSION.id && (!ms || now() - ms.t > MARKET_AUTO_SCAN_MS)) { marketAutoScanned = true; runScan(); }
-    else if (ms && (!buys || buys.Y === undefined) && buildBuyLists()) { renderScouting(); return; }
-    else if (!getSlice('sellList') && (getSlice('ownSquads') || {}).data && buildSellList()) { renderScouting(); return; }
+    else if (ms && (!buys || buys.Y === undefined || (buys.A && !buys.A.formation)) && buildBuyLists()) { renderScouting(); return; } // lists built before v3.41.1 judged a different XI
+    else if ((!getSlice('sellList') || getSlice('sellList').t < Date.UTC(2026, 10, 18)) && (getSlice('ownSquads') || {}).data && buildSellList()) { renderScouting(); return; }
 
     bind('tma-scout-refresh', async () => {
       const status = document.getElementById('tma-scout-status');
