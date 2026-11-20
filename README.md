@@ -202,6 +202,15 @@ R5 is the community-validated rating formula. It computes a single number from a
 
 TM Advisor's R5 engine is based on two independent community scripts (RatingR6 ReWrite and Brzk's Squad R5 Value) — both derive the same formulas from the game's own data. The weights are per-position (DC, DMC, MC, FC, GK, etc.), and multi-position players get a separate R5 for each eligible position.
 
+**Tuned against real matches (v3.42.0).** Every rating was tested against TM's own match ratings: 12,746 starts from 593 recent matches across 11 top divisions, with team strength, opponent strength and home advantage held constant. Results:
+
+- **R5 matched or beat** RX6, TM's stars, SI and a free skill-by-skill fit in every role except two. Those two now use retuned weights.
+- **Forwards:** less weight on Strength and Heading (neither helped), more on Finishing and Long shots. This predicts 7% better.
+- **Wide midfielders:** less weight on Pace, Strength and Heading, more on Technique, Passing and Crossing. This predicts 16% better.
+- Both changes held up in each half of the leagues separately.
+- SI added nothing once R5 was known. The SI ≥ 50,000 floor on senior buys is the user's own preference, not a measured effect.
+- One match rating is mostly noise (any rating explains only 2–6% of it). These are average effects over hundreds of players, not a verdict on any one player.
+
 No skills are invented. No ratings are guessed. Everything comes from what the game shows you or what the game's own AJAX endpoints return.
 
 ---

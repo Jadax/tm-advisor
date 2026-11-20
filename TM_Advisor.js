@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Advisor — Tactics, Stadium, Scouting & Youth Dashboard
 // @namespace    https://tushantsharma.tools/tm-advisor
-// @version      3.41.1
+// @version      3.42.0
 // @description  A single visual advisor for TrophyManager. A collapsible dock (bottom-right) that shows exactly ONE tab — whichever is relevant to the page you're on: Dashboard on the homepage, Tactics on the tactics page, Scouting on the transfer/scouts pages, Stadium on stadium/finances. The dock is hidden on /club/ and /players pages, which instead get inline Rou/SI/R5 columns and a compact player-profile stat card; background capture/caching still runs there. Tactics gives you formation, mentality/style/focus, captain/set-piece takers, bench, position-aware conditional substitution orders and the opponent's expected next-fixture tactics. Scouting gives a tiered (Elite/Strong) youth and senior transfer shortlist built ONLY from players actually seen on the /transfer/ list, with confirmed Sell-to-Agent/Max Sell Price valuations and spending guidance. Overlays accurate R5 + team averages on the match page, and captures full match stats and a goal/card/injury timeline. All numbers come from the game's own data or formulas cross-confirmed against multiple independent community scripts — nothing is guessed.
 // @author       Tushant Sharma
 // @license      MIT
@@ -603,10 +603,15 @@
     [0.23412419, 0.32032289, 0.62194779, 0.63162534, 0.63143081, 0.45218831, 0.47370658, 0.55054737, 0.17744915, 0.39932519, 0.26915814, 0.16413124, 0.07404301, 0],
     [0.27276905, 0.26814289, 0.61104798, 0.39865092, 0.42862643, 0.43582015, 0.46617076, 0.44931076, 0.25175412, 0.46446692, 0.29986350, 0.43843061, 0.21494592, 0],
     [0.25219260, 0.25112993, 0.56090649, 0.18230261, 0.18376490, 0.45928749, 0.53498118, 0.59461481, 0.09851189, 0.61601950, 0.31243959, 0.65402884, 0.29982016, 0],
-    [0.28155678, 0.24090675, 0.60680245, 0.19068879, 0.20018012, 0.45148647, 0.48230007, 0.42982389, 0.26268609, 0.57933805, 0.31712419, 0.65824985, 0.29885649, 0],
+    // M L/R and F rows retuned by TM Advisor (2026-11-20) on TM's own match ratings: 12,746
+    // starts from 593 matches of 11 top divisions, strength/home held constant. Out-of-sample
+    // fit vs community R5: F +7% (Str .35→.15, Hea .45→.25, Fin 1.04→1.2, Lon .43→.6),
+    // M L/R +16% (Str .28→.1, Pac .61→.3, Hea .32→.15, Pas .43→.6, Cro .26→.4, Tec .58→.8);
+    // both held in each half of the leagues. Every other row matched the best fit — unchanged.
+    [0.10, 0.24090675, 0.30, 0.19068879, 0.20018012, 0.45148647, 0.48230007, 0.60, 0.40, 0.80, 0.15, 0.65824985, 0.29885649, 0],
     [0.22029884, 0.29229690, 0.63248227, 0.09904394, 0.10043602, 0.47469498, 0.52919791, 0.77555880, 0.10531819, 0.71048302, 0.27667115, 0.56813972, 0.21537826, 0],
     [0.21151292, 0.35804710, 0.88688492, 0.14391236, 0.13769621, 0.46586605, 0.34446036, 0.51377701, 0.59723919, 0.75126119, 0.16550722, 0.29966502, 0.12417045, 0],
-    [0.35479780, 0.14887553, 0.43273380, 0.00023928, 0.00021111, 0.46931131, 0.57731335, 0.41686333, 0.05607604, 0.62121195, 0.45370457, 1.03660702, 0.43205492, 0],
+    [0.15, 0.14887553, 0.43273380, 0.00023928, 0.00021111, 0.46931131, 0.57731335, 0.41686333, 0.05607604, 0.62121195, 0.25, 1.2, 0.6, 0],
     [0.45462811, 0.30278232, 0.45462811, 0.90925623, 0.45462811, 0.90925623, 0.45462811, 0.45462811, 0.30278232, 0.15139116, 0.15139116] // GK
   ];
   const WEIGHT_RB = [
@@ -622,6 +627,9 @@
     [0.07466384, 0.07466384, 0.07466384, 0.14932769, 0.10452938, 0.14932769, 0.10452938, 0.10344411, 0.07512610, 0.04492581, 0.04479831] // GK
   ];
   const POS_MULTIPLIERS = [0.3, 0.3, 0.9, 0.6, 1.5, 0.9, 0.9, 0.6, 0.3];
+  // Keeps the retuned rows' average on R5's scale (mean over the same top-division starters),
+  // so the 75 floor and cross-position comparisons mean what they did.
+  const TUNE_SHIFT = { 5: 1.66, 8: 0.98 };
   const fix2 = v => (Math.round(v * 100) / 100).toFixed(2);
 
   function getPositionIndex(pos) {
@@ -728,7 +736,7 @@
       const ds = sr[0] ** 2 + sr[1] ** 2 * 0.5 + sr[2] ** 2 * 0.5 + sr[3] ** 2 + sr[4] ** 2 + sr[5] ** 2 + sr[6] ** 2;
       const os = sr[0] ** 2 * 0.5 + sr[1] ** 2 * 0.5 + sr[2] ** 2 + sr[3] ** 2 + sr[4] ** 2 + sr[5] ** 2 + sr[6] ** 2;
       const m = POS_MULTIPLIERS[posIdx];
-      return Number(fix2(rating + hb * 1 + fk * 1 + ck * 1 + pk * 1 + fix2(ds / 6 / 22.9 ** 2) * m + fix2(os / 6 / 22.9 ** 2) * m));
+      return Number(fix2(rating + hb * 1 + fk * 1 + ck * 1 + pk * 1 + fix2(ds / 6 / 22.9 ** 2) * m + fix2(os / 6 / 22.9 ** 2) * m + (TUNE_SHIFT[posIdx] || 0)));
     }
     return Number(fix2(rating));
   }
@@ -3153,6 +3161,9 @@
   const BUY_LIST_LEN = 8;
   const BUY_VALUE_MIN_SCORE = 8;
   const MIN_LINEUP_R5 = 75; // user: no starter below R5 75
+  // User (2026-11-20): seniors need SI ≥ 50,000 — a wide spread of skills, more rounded than
+  // R5 alone shows. Under-24s may get there by next season instead.
+  const MIN_SENIOR_SI = 50000;
   // Roundedness rules (user: higher SI with a high R5 is always better). Heuristics: out under
   // 90% of the typical skill total for his R5 (live: R5 77-79 on SI ~25k read −12%/−13%);
   // ranking tilted ±2% per 1% above/below, capped at ±20%.
@@ -3442,7 +3453,10 @@
     // projected to reach 75 next season; youth (≤ 21) are bought for the reserves to develop,
     // judged by where they'll be at 27, not by today's XI.
     const r5Next = c => { const q = projectPlayer(c, PROJECT_YEARS); return q && q._r5 != null ? Number(q._r5) : Number(c._r5); };
-    const seniorOk = c => Number(c._r5) >= MIN_LINEUP_R5 || (c.age < 24 && r5Next(c) >= MIN_LINEUP_R5);
+    const siNow = c => Number(String(c.asi || '').replace(/,/g, '')) || 0;
+    const siNext = c => { const q = projectPlayer({ ...c }, PROJECT_YEARS); return q && q.asi ? Number(q.asi) : siNow(c); };
+    const siOk = c => siNow(c) >= MIN_SENIOR_SI || (c.age < 24 && siNext(c) >= MIN_SENIOR_SI);
+    const seniorOk = c => siOk(c) && (Number(c._r5) >= MIN_LINEUP_R5 || (c.age < 24 && r5Next(c) >= MIN_LINEUP_R5));
     const xiBar = Math.min(...ctxA.now.base.lineup.filter(l => l.player).map(l => l.effectiveR5));
     const prospectBar = Math.max(MIN_LINEUP_R5, xiBar);
     const rowsA = [], rowsY = [];
@@ -4883,7 +4897,7 @@
    * ============================================================ */
 
   // Keep equal to @version — the self-check flags a mismatch with Tampermonkey's own copy.
-  const BUILD_VERSION = '3.41.1';
+  const BUILD_VERSION = '3.42.0';
   const installedVersion = () => { try { return (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || BUILD_VERSION; } catch (e) { return BUILD_VERSION; } };
   const cmpVersion = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
   const VERSION_URL = 'https://raw.githubusercontent.com/Jadax/tm-advisor/main/TM_Advisor.js';
@@ -6096,7 +6110,7 @@
       </div>`;
     body.innerHTML = `
       ${scanHtml}
-      ${teamSection('First team', buys && buys.A, true, `R5 ≥ ${MIN_LINEUP_R5} (or under 24 and reaching it next season) <b>and</b> an upgrade to your best XI now and in a year (both sides projected). Best = biggest total gain; value = gain per million.`)}
+      ${teamSection('First team', buys && buys.A, true, `R5 ≥ ${MIN_LINEUP_R5} and SI ≥ ${MIN_SENIOR_SI.toLocaleString()} (or under 24 and reaching both next season) <b>and</b> an upgrade to your best XI now and in a year (both sides projected). Best = biggest total gain; value = gain per million.`)}
       ${buys && buys.Y ? `
       <details class="tma-card"><summary style="cursor:pointer;"><h4 style="display:inline;">Youth prospects 🌱 <span class="tma-badge">${buys.Y.count}</span></h4></summary>
         <div class="tma-mini" style="margin:4px 0;">Aged ≤ ${RESERVE_MAX_AGE}: they develop in the reserves. Listed only if projected to reach R5 ${buys.Y.bar.toFixed(1)} by ${projectionAge()} (your ${MIN_LINEUP_R5} floor, or your weakest starter if higher) — growth from his own training this season where his wage shows it, else your club's curve × his talent.</div>
